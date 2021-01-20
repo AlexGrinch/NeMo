@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional
 
 from hydra.core.config_store import ConfigStore
 
@@ -35,7 +35,7 @@ class TrainerConfig:
         https://pytorch-lightning.readthedocs.io/en/latest/trainer.html#
     """
 
-    logger: Any = True
+    logger: Any = False
     checkpoint_callback: Any = True
     callbacks: Optional[Any] = None
     default_root_dir: Optional[str] = None
