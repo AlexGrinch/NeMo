@@ -35,7 +35,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_seq_length', type=int, default=512, help='Max Sequence Length')
     parser.add_argument('--min_seq_length', type=int, default=1, help='Min Sequence Length')
     parser.add_argument(
-        '--tokens_in_batch', type=str, default="8000,12000,16000,40000", help='# Tokens per batch per GPU'
+        '--tokens_in_batch', type=str, default="2048,4096,8192", help='# Tokens per batch per GPU'
     )
 
     args = parser.parse_args()

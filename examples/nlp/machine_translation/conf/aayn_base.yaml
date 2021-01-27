@@ -1,15 +1,15 @@
 model:
   beam_size: 4
   len_pen: 0.6
-  max_generation_delta: 5
+  max_generation_delta: 20
   label_smoothing: 0.1
 
   train_ds:
-    src_file_name: ???
-    tgt_file_name: ???
-    tokens_in_batch: 512
+    src_file_name: /workspace/datasets/wmt20_en_ru/ngc/train.en
+    tgt_file_name: /workspace/datasets/wmt20_en_ru/ngc/train.ru
+    tokens_in_batch: 8192
     clean: true
-    max_seq_length: 512
+    max_seq_length: 192
     cache_ids: true
     cache_data_per_node: false
     use_cache: true
@@ -20,14 +20,14 @@ model:
     num_workers: 8
 
   validation_ds:
-    src_file_name: ???
-    tgt_file_name: ???
-    tokens_in_batch: 512
+    src_file_name: /workspace/datasets/wmt20_en_ru/ngc/valid.en
+    tgt_file_name: /workspace/datasets/wmt20_en_ru/ngc/valid.ru
+    tokens_in_batch: 4096
     clean: false
-    max_seq_length: 512
-    cache_ids: true
+    max_seq_length: 192
+    cache_ids: false
     cache_data_per_node: false
-    use_cache: true
+    use_cache: false
     shuffle: false
     num_samples: -1
     drop_last: false
@@ -35,14 +35,14 @@ model:
     num_workers: 8
 
   test_ds:
-    src_file_name: ???
-    tgt_file_name: ???
-    tokens_in_batch: 512
+    src_file_name: /workspace/datasets/wmt20_en_ru/ngc/valid.en
+    tgt_file_name: /workspace/datasets/wmt20_en_ru/ngc/valid.ru
+    tokens_in_batch: 4096
     clean: false
-    max_seq_length: 512
-    cache_ids: true
+    max_seq_length: 192
+    cache_ids: false
     cache_data_per_node: false
-    use_cache: true
+    use_cache: false
     shuffle: false
     num_samples: -1
     drop_last: false
@@ -51,7 +51,7 @@ model:
 
   optim:
     name: adam
-    lr: 0.001
+    lr: 0.0001
     betas:
       - 0.9
       - 0.98
@@ -64,13 +64,13 @@ model:
 
   encoder_tokenizer:
     tokenizer_name: yttm
-    tokenizer_model: ???
+    tokenizer_model: /workspace/datasets/wmt20_en_ru/ngc/tokenizer.encoder.8192.BPE.model
     vocab_file: null
     special_tokens: null
 
   decoder_tokenizer:
     tokenizer_name: yttm
-    tokenizer_model: ???
+    tokenizer_model: /workspace/datasets/wmt20_en_ru/ngc/tokenizer.decoder.8192.BPE.model
     vocab_file: null
     special_tokens: null
 
@@ -80,7 +80,7 @@ model:
     embedding_dropout: 0.1
     learn_positional_encodings: false
     hidden_size: 512
-    num_layers: 6
+    num_layers: 12
     inner_size: 2048
     num_attention_heads: 8
     ffn_dropout: 0.1
@@ -93,15 +93,15 @@ model:
   decoder:
     max_sequence_length: 512
     num_token_types: 2
-    embedding_dropout: 0.1
+    embedding_dropout: 0.0
     learn_positional_encodings: false
     hidden_size: 512
     inner_size: 2048
-    num_layers: 6
+    num_layers: 4
     num_attention_heads: 8
-    ffn_dropout: 0.1
-    attn_score_dropout: 0.1
-    attn_layer_dropout: 0.1
+    ffn_dropout: 0.0
+    attn_score_dropout: 0.0
+    attn_layer_dropout: 0.0
     hidden_act: relu
     pre_ln: false
 
@@ -115,13 +115,13 @@ model:
 trainer:
   gpus: 4
   num_nodes: 1
-  max_epochs: 200
+  max_steps: 100000
   amp_level: O2 # O1/O2 for mixed precision
   precision: 16 # Should be set to 16 for O1 and O2, default is 16 as PT ignores it when am_level is O0
   accelerator: ddp
   checkpoint_callback: False
   logger: False
-  log_every_n_steps: 50  # Interval of logging.
+  log_every_n_steps: 10000  # Interval of logging.
   check_val_every_n_epoch: 1
 
 exp_manager:
