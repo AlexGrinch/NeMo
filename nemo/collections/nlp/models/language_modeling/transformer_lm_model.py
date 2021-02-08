@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import math
+import pandas as pd
+import numpy as np
 from typing import Dict, Optional
 
 import torch
@@ -33,6 +35,29 @@ from nemo.utils import logging
 __all__ = ["TransformerLMModel"]
 
 
+class BeamSearchDataset(torch.utils.data.Dataset):
+    def __init__(self, data_path, tokenizer, max_seq_length=256):
+        self.data = pd.read_csv(data_path, delimiter="\t", header=None)
+        self.tokenizer = tokenizer
+        self.max_seq_length = max_seq_length
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        tokens = [self.tokenizer.bos_id] + \
+            self.tokenizer.text_to_ids(str(self.data[0][idx])) + [self.tokenizer.eos_id]
+        input_ids = [self.tokenizer.pad_id] * self.max_seq_length
+        input_ids[: len(tokens)] = tokens
+        input_ids = np.array(input_ids)
+        input_mask = (input_ids != self.tokenizer.pad_id).astype(np.float32)
+        score = self.data[1][idx]
+        dist = self.data[2][idx]
+        ref_len = self.data[3][idx]
+        len_in_chars = len(str(self.data[0][idx]))
+        return input_ids, input_mask, score, dist, ref_len, len_in_chars, idx
+
+
 class TransformerLMModel(ModelPT):
     """
     Left-to-right Transformer language model.
@@ -51,7 +76,8 @@ class TransformerLMModel(ModelPT):
         self.dataset_cfg = cfg.dataset
         self.tokenizer = get_tokenizer(
             tokenizer_name=cfg.language_model.tokenizer,
-            vocab_file=cfg.language_model.vocab_file,
+            vocab_file=cfg.language_model.get("vocab_file", None),
+            tokenizer_model=cfg.language_model.get("tokenizer_model", None),
             special_tokens=cfg.language_model.special_tokens,
         )
 
@@ -121,6 +147,9 @@ class TransformerLMModel(ModelPT):
         input_ids, input_mask, labels = batch
         log_probs = self(input_ids=input_ids, attention_mask=input_mask)
 
+        target_log_probs = log_probs.gather(2, input_ids[:, 1:].unsqueeze(2)).squeeze(2)
+        lm_scores = torch.sum(target_log_probs * input_mask[:, :-1], dim=-1)
+
         train_loss = self.training_loss(log_probs=log_probs, labels=labels)
         training_perplexity = self.training_perplexity(logits=log_probs)
 
@@ -136,15 +165,27 @@ class TransformerLMModel(ModelPT):
         Lightning calls this inside the validation loop with the data from the validation dataloader
         passed in as `batch`.
         """
-        input_ids, input_mask, labels = batch
-        log_probs = self(input_ids=input_ids, attention_mask=input_mask)
-
-        val_loss = self.validation_loss(log_probs=log_probs, labels=labels)
+        input_ids, input_mask, scores, dist, ref_len, len_in_chars, idxs = batch
+        
+        log_probs = self(input_ids=input_ids[:,:-1], attention_mask=input_mask[:,:-1])
+        val_loss = self.validation_loss(log_probs=log_probs, labels=input_ids[:,1:])
         self.validation_perplexity(logits=log_probs)
+        
+        target_log_probs = log_probs.gather(2, input_ids[:, 1:].unsqueeze(2)).squeeze(2)
+        lm_scores = torch.sum(target_log_probs * input_mask[:, :-1], dim=-1)
 
-        tensorboard_logs = {"val_loss": val_loss}
+        tensorboard_logs = {
+            "val_loss": val_loss,
+        }
 
-        return {"val_loss": val_loss, "log": tensorboard_logs}
+        return {"val_loss": val_loss,
+                "am_scores": scores,
+                "lm_scores": lm_scores,
+                "dist": dist,
+                "ref_len": ref_len,
+                "len_in_chars": len_in_chars,
+                "idxs": idxs,
+                "log": tensorboard_logs}
 
     def validation_epoch_end(self, outputs):
         """
@@ -154,8 +195,87 @@ class TransformerLMModel(ModelPT):
 
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
         validation_perplexity = self.validation_perplexity.compute()
-        tensorboard_logs = {"val_loss": avg_loss, "val_ppl": validation_perplexity}
+
+        idxs = torch.cat([x["idxs"] for x in outputs])
+        dist = torch.cat([x["dist"] for x in outputs])
+        ref_len = torch.cat([x["ref_len"] for x in outputs])
+        len_in_chars = torch.cat([x["len_in_chars"] for x in outputs])
+        ints = torch.stack([idxs, dist, ref_len, len_in_chars])
+        
+        am_scores = torch.cat([x["am_scores"] for x in outputs])
+        lm_scores = torch.cat([x["lm_scores"] for x in outputs])
+        scores = torch.stack([am_scores, lm_scores])
+
+        all_ints, all_scores = [], []
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            for ind in range(world_size):
+                all_ints.append(torch.empty_like(ints))
+                all_scores.append(torch.empty_like(scores))
+            torch.distributed.all_gather(all_ints, ints)
+            torch.distributed.all_gather(all_scores, scores)
+        else:
+            all_ints.append(ints)
+            all_scores.append(scores)
+
+        model_wer, ideal_wer, worst_wer, lm_wer, coef1, coef2 = 0, 0, 0, 0, 0, 0
+
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                
+            idxs, dist, ref_len, len_in_chars = torch.cat(all_ints, dim=1)
+            am_scores, lm_scores = torch.cat(all_scores, dim=1)
+
+            idxs = idxs.sort()[1]
+            dist, ref_len, len_in_chars = dist[idxs], ref_len[idxs], len_in_chars[idxs]
+            am_scores, lm_scores = am_scores[idxs], lm_scores[idxs]
+
+            am_scores = am_scores.view(-1, self.dataset_cfg.beam_size)
+            lm_scores = lm_scores.view(-1, self.dataset_cfg.beam_size)
+            dist = dist.view(-1, self.dataset_cfg.beam_size)
+            ref_len = ref_len.view(-1, self.dataset_cfg.beam_size)
+            len_in_chars = len_in_chars.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
+            total_len = ref_len[:,0].sum()
+
+            model_wer = dist[:,0].sum() / total_len
+            ideal_wer = dist.min(dim=1)[0].sum() / total_len
+            worst_wer = dist.max(dim=1)[0].sum() / total_len
+
+            coef1, wer1 = self.line_search_wer(dist, am_scores, lm_scores, total_len)
+            scores = am_scores + coef1 * lm_scores
+            coef2, lm_wer = self.line_search_wer(dist, scores, len_in_chars, total_len)
+
+            model_wer, ideal_wer, worst_wer = model_wer.item(), ideal_wer.item(), worst_wer.item()
+
+        tensorboard_logs = {
+            "val_loss": avg_loss,
+            "val_ppl": validation_perplexity,
+            "model_wer": model_wer,
+            "ideal_wer": ideal_wer,
+            "worst_wer": worst_wer,
+            "lm_wer": lm_wer,
+            "neural_lm_coef": coef1,
+            "len_in_chars_coef": coef2,
+        }
+
         return {"val_loss": avg_loss, "log": tensorboard_logs}
+    
+    def line_search_wer(self, dist, scores1, scores2, total_len=1):
+
+        scale = scores1.mean().abs().item() / scores2.mean().abs().item()
+        left = self.dataset_cfg.coef_range[0] * scale
+        right = self.dataset_cfg.coef_range[1] * scale
+        coefs = np.linspace(left, right, self.dataset_cfg.coef_steps)
+
+        best_wer = 10000
+        best_coef = left
+        for coef in coefs:
+            scores = scores1 + coef * scores2
+            indices = scores.max(dim=1, keepdim=True)[1]
+            wer = dist.gather(dim=1, index=indices).sum().item() / total_len
+            if wer < best_wer:
+                best_wer = wer
+                best_coef = coef
+        return best_coef, best_wer
 
     def test_step(self, batch, batch_idx):
         """
@@ -198,13 +318,28 @@ class TransformerLMModel(ModelPT):
                 )
 
     def setup_validation_data(self, val_data_config: Optional[DictConfig]):
-        self._validation_dl = self._setup_dataloader_from_config(
+        self._validation_dl = self._setup_val_dataloader(
             cfg=val_data_config, predict_last_k=self.dataset_cfg.get("predict_last_k", 0),
         )
 
     def setup_test_data(self, test_data_config: Optional[DictConfig]):
         self._test_dl = self._setup_dataloader_from_config(
             cfg=test_data_config, predict_last_k=self.dataset_cfg.get("predict_last_k", 0),
+        )
+        
+    def _setup_val_dataloader(self, cfg: DictConfig, predict_last_k=0):
+        dataset = BeamSearchDataset(
+            data_path=cfg.file_name,
+            tokenizer=self.tokenizer,
+            max_seq_length=self.dataset_cfg.max_seq_length
+        )
+        return torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            num_workers=self.dataset_cfg.get("num_workers", 2),
+            pin_memory=self.dataset_cfg.get("pin_memory", False),
+            drop_last=self.dataset_cfg.get("drop_last", False),
         )
 
     def _setup_dataloader_from_config(self, cfg: DictConfig, predict_last_k=0):

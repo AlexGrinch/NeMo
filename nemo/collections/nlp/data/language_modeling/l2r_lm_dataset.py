@@ -55,17 +55,23 @@ class L2RLanguageModelingDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.batch_step = batch_step or self.max_seq_length
-        ids = dataset_to_ids(dataset, tokenizer, cache_ids=use_cache, add_bos_eos=False)
-        self.ids = np.array([j for i in ids for j in i])
+        self.ids = dataset_to_ids(dataset, tokenizer, cache_ids=use_cache, add_bos_eos=True)
+        #self.ids = np.array([j for i in ids for j in i])
 
     def __len__(self):
-        return (len(self.ids) - self.max_seq_length) // self.batch_step
+        return (len(self.ids))
 
     def __getitem__(self, idx):
-        left = idx * self.batch_step
-        right = left + self.max_seq_length
-        src_ids = self.ids[left:right]
-        labels = self.ids[left + 1 : right + 1]
+        #left = idx * self.batch_step
+        #right = left + self.max_seq_length
+        
+        src_ids = [self.tokenizer.pad_id] * self.max_seq_length
+        src_ids[:len(self.ids[idx])] = self.ids[idx]
+        src_ids = np.array(src_ids)
+
+        labels = src_ids[1:]
+        src_ids = src_ids[:-1]
+
         src_mask = (src_ids != self.tokenizer.pad_id).astype(np.float32)
         return src_ids, src_mask, labels
 
@@ -177,6 +183,7 @@ class TarredL2RLanguageModelingDataset(IterableDataset):
 
             begin_idx = (len(text_tar_filepaths) // world_size) * global_rank
             end_idx = begin_idx + (len(text_tar_filepaths) // world_size)
+
             text_tar_filepaths = text_tar_filepaths[begin_idx:end_idx]
             logging.info(
                 "Partitioning tarred dataset: process (%d) taking shards [%d, %d)", global_rank, begin_idx, end_idx
@@ -207,18 +214,25 @@ class TarredL2RLanguageModelingDataset(IterableDataset):
         npy.close()
 
         # Select random contiguous subsegment
-        idx = np.random.randint(0, (len(data) - self.max_seq_length) // self.batch_step)
+        idx = np.random.randint(0, len(data))
 
-        # Slice of data chunk
-        left = idx * self.batch_step
-        right = left + self.max_seq_length
-        data = data[left : right + 1]
+#         # Slice of data chunk
+#         left = idx * self.batch_step
+#         right = left + self.max_seq_length
+#         data = data[left : right + 1]
 
-        # Create batch
-        src_ids = data[:-1]
-        labels = data[1:]
+#         # Create batch
+#         src_ids = data[:-1]
+#         labels = data[1:]
+#         src_mask = (src_ids != self.tokenizer.pad_id).astype(np.float32)
+        
+        src_ids = data[idx]
+        labels = src_ids[1:]
+        src_ids = src_ids[:-1]
         src_mask = (src_ids != self.tokenizer.pad_id).astype(np.float32)
+
         return src_ids, src_mask, labels
+
 
     def __iter__(self):
         # We need to wrap an infinite generator since the actual files
@@ -226,6 +240,7 @@ class TarredL2RLanguageModelingDataset(IterableDataset):
         # This prevents PTL from early exiting the train loop after exhausting
         # all of the files in one iteration (though the actual dataset is many
         # times larger due to each file containing a large chunk of data).
+
         dl_iter = iter(self._dataset)
         while True:
             try:
@@ -236,4 +251,4 @@ class TarredL2RLanguageModelingDataset(IterableDataset):
                 continue
 
     def __len__(self):
-        return (self.metadata['num_text'] - self.max_seq_length) // self.batch_step
+        return self.metadata['num_text']

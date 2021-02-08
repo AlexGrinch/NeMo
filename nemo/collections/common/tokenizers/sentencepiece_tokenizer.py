@@ -45,7 +45,7 @@ class SentencePieceTokenizer(TokenizerSpec):
         self.special_token_to_id = {}
         self.id_to_special_token = {}
         if special_tokens:
-            self.add_special_tokens(special_tokens)
+            self.add_special_tokens(dict(special_tokens))
 
     def text_to_tokens(self, text):
         tokens = []

@@ -54,6 +54,12 @@ parser.add_argument(
     type=int,
     help='Number of chunks of `chunk_size` to buffer for parallel tokenization and serial write to disk',
 )
+parser.add_argument(
+    '--max_seq_length',
+    default=128,
+    type=int,
+    help='Maximum allowed sequence length in tokens',
+)
 parser.add_argument('--lower_case', action='store_true', help='Whether to lower case the corpus')
 parser.add_argument('--log', action='store_true', help='Whether to print logs to terminal')
 
@@ -116,16 +122,21 @@ def __build_dataset_from_text(texts: str, lower_case: bool, chunk_size: int):
         yield text_dataset, num_lines
 
 
-def __tokenize_str(texts, tokenizer):
+def __tokenize_str(texts, tokenizer, max_seq_length=128):
     tokenized_text = []
     for text in texts:
-        tok_text = tokenizer.text_to_ids(text)
-        tokenized_text.extend(tok_text)
+        tokens = tokenizer.text_to_ids(text)[:max_seq_length-2]
+        tokens = [tokenizer.bos_id] + tokens + [tokenizer.eos_id]
+        input_ids = [tokenizer.pad_id] * max_seq_length
+        input_ids[: len(tokens)] = tokens
+        tokenized_text.append(input_ids)
+
     return tokenized_text
 
 
 def __tokenize_text(
-    text_paths, tokenizer, tokenized_cachedir, lower_case: bool = False, chunk_size=8192, write_buffer: int = -1
+    text_paths, tokenizer, tokenized_cachedir, lower_case: bool = False,
+    chunk_size=8192, write_buffer: int = -1, max_seq_length: int = 128
 ):
     if write_buffer < 1:
         write_buffer = max(os.cpu_count() - write_buffer, 1)
@@ -148,7 +159,7 @@ def __tokenize_text(
     global_num_lines = 0
     last_batch = False
 
-    with joblib.Parallel(n_jobs=-2, verbose=10) as parallel:
+    with joblib.Parallel(n_jobs=1, verbose=10) as parallel:
 
         while True:
             try:
@@ -165,7 +176,7 @@ def __tokenize_text(
             if (chunk_idx == write_buffer) or last_batch:
                 # write the chunks into disk after parallel tokenization
                 tokenized_data_list = parallel(
-                    joblib.delayed(__tokenize_str)(chunk, tokenizer) for chunk in data_cache
+                    joblib.delayed(__tokenize_str)(chunk, tokenizer, max_seq_length) for chunk in data_cache
                 )
 
                 # Sequential write cache
@@ -283,14 +294,18 @@ def main():
         if args.tokenizer_name is None:
             raise ValueError("`tokenizer_name` name is required when tokenizing the dataset for the first time.")
 
-        if args.tokenizer_vocab_file is None:
-            raise ValueError("`tokenizer_vocab_file` is required when constructing the tokenized dataset")
-
+        special_tokens = {
+            "unk_token": '<UNK>',
+            "pad_token": '<PAD>',
+            "bos_token": '<BOS>',
+            "eos_token": '<EOS>',
+        }
+            
         tokenizer = get_tokenizer(
             tokenizer_name=args.tokenizer_name,
             tokenizer_model=args.tokenizer_model,
             vocab_file=args.tokenizer_vocab_file,
-            special_tokens=args.tokenizer_special_tokens,
+            special_tokens=special_tokens,
         )
 
         logging.info("Built tokenizer")
@@ -303,6 +318,7 @@ def main():
             lower_case=args.lower_case,
             chunk_size=args.chunk_size,
             write_buffer=args.chunk_write_buffer,
+            max_seq_length=args.max_seq_length,
         )
         logging.info(f"Tokenized dataset into sub-words and serialized cache at {tokenized_cachedir}")
 
