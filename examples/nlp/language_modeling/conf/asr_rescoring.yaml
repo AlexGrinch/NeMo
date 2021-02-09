@@ -4,7 +4,7 @@ name: &name TransformerLM
 trainer:
   gpus: 4 # the number of gpus, 0 for CPU
   num_nodes: 1
-  max_steps: 100000 # precedence over max_epochs
+  max_steps: 500000 # precedence over max_epochs
   accumulate_grad_batches: 1 # accumulates grads every k batches
   amp_level: O2 # O1/O2 for mixed precision
   precision: 16 # Should be set to 16 for O1 and O2, default is 16 as PT ignores it when am_level is O0
@@ -12,20 +12,20 @@ trainer:
   checkpoint_callback: False  # Provided by exp_manager
   logger: False  # Provided by exp_manager
   log_every_n_steps: 1  # Interval of logging.
-  val_check_interval: 1.0  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
+  val_check_interval: 0.05  # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
 
 model:
 
   language_model:
-    tokenizer: yttm
+    tokenizer: word
     special_tokens:
         unk_token: '<UNK>'
         pad_token: '<PAD>'
         bos_token: '<BOS>'
         eos_token: '<EOS>'
-    #vocab_file: /workspace/datasets/libri/ngc_dataset/vocab155k.txt
-    tokenizer_model: /workspace/datasets/libri/ngc_dataset/model.4096.yttm
+    vocab_file: null
+    tokenizer_model: null
     hidden_size: 512
     num_layers: 16
     num_attn_heads: 8
@@ -44,24 +44,25 @@ model:
     predict_last_k: 0 # number of last tokens to predict on evaluation
     
     # asr re-scoring specific parameters
-    beam_size: 128 # size of the beam of candidates
+    beam_size: 128 # size of the candidates beam
     coef_range: [0, 3] # search range for LM fusion coefficients
-    coef_steps: 500 # fineness of coefficients search
+    coef_steps: 1000 # fineness of LM fusion coefficients search
 
   train_ds:
-    #file_name: /workspace/datasets/libri/lm_dataset/dev_other_x10.txt
-    batch_size: 64
+    file_name: null # use this for standard (non-tarred) dataset
+    batch_size: 128
     shuffle: true
     num_samples: -1 # number of samples to be considered, -1 means all the dataset
 
+    # tarred dataset specific parameters
     is_tarred: true
-    tarred_text_filepaths: /workspace/datasets/libri/lm_dataset/tarred3/text__OP_0..63_CL_.tar
-    file_name: /workspace/datasets/libri/lm_dataset/tarred3/metadata.json
-    shuffle_n: 1
+    tarred_text_filepaths: null # multi-path to all tars, e.g. /raid/tarred_dataset/text__OP_0..63_CL_.tar
+    file_name: null # path to metadata.json, e.g. /raid/tarred_dataset/metadata.json
+    shuffle_n: 64
 
   validation_ds:
-    file_name: /workspace/datasets/libri/ngc_dataset/citri_dev_other_wer.tsv # path to file with validation data
-    batch_size: 64
+    file_name: null # path to file with validation data
+    batch_size: 128
     shuffle: false
     num_samples: -1 # number of samples to be considered, -1 means all the dataset
 

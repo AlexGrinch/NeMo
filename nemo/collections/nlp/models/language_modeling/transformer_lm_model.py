@@ -246,6 +246,11 @@ class TransformerLMModel(ModelPT):
 
             model_wer, ideal_wer, worst_wer = model_wer.item(), ideal_wer.item(), worst_wer.item()
 
+            logging.info("\n\n\n\n")
+            logging.info(f"     AM+n_gram WER: {np.round(model_wer * 100, 2)}")
+            logging.info(f" +LM rescoring WER: {np.round(lm_wer * 100, 2)}")
+            logging.info(f" Best possible WER: {np.round(ideal_wer * 100, 2)}")
+
         tensorboard_logs = {
             "val_loss": avg_loss,
             "val_ppl": validation_perplexity,
@@ -271,7 +276,8 @@ class TransformerLMModel(ModelPT):
         for coef in coefs:
             scores = scores1 + coef * scores2
             indices = scores.max(dim=1, keepdim=True)[1]
-            wer = dist.gather(dim=1, index=indices).sum().item() / total_len
+            wer = dist.gather(dim=1, index=indices).sum() / total_len
+            wer = wer.item()
             if wer < best_wer:
                 best_wer = wer
                 best_coef = coef
