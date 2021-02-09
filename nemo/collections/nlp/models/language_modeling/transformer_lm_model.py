@@ -231,8 +231,8 @@ class TransformerLMModel(ModelPT):
 
             am_scores = am_scores.view(-1, self.dataset_cfg.beam_size)
             lm_scores = lm_scores.view(-1, self.dataset_cfg.beam_size)
-            dist = dist.view(-1, self.dataset_cfg.beam_size)
-            ref_len = ref_len.view(-1, self.dataset_cfg.beam_size)
+            dist = dist.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
+            ref_len = ref_len.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
             len_in_chars = len_in_chars.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
             total_len = ref_len[:,0].sum()
 
