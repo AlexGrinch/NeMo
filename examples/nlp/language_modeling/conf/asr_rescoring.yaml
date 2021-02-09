@@ -49,7 +49,7 @@ model:
     coef_steps: 1000 # fineness of LM fusion coefficients search
 
   train_ds:
-    file_name: null # use this for standard (non-tarred) dataset
+    file_name: null # path to train.txt for standard dataset / path to metadata.json for tarred dataset
     batch_size: 128
     shuffle: true
     num_samples: -1 # number of samples to be considered, -1 means all the dataset
@@ -57,7 +57,6 @@ model:
     # tarred dataset specific parameters
     is_tarred: true
     tarred_text_filepaths: null # multi-path to all tars, e.g. /raid/tarred_dataset/text__OP_0..63_CL_.tar
-    file_name: null # path to metadata.json, e.g. /raid/tarred_dataset/metadata.json
     shuffle_n: 64
 
   validation_ds:
