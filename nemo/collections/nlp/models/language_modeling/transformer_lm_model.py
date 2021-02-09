@@ -262,7 +262,7 @@ class TransformerLMModel(ModelPT):
             "len_in_chars_coef": coef2,
         }
 
-        return {"val_loss": avg_loss, "log": tensorboard_logs}
+        return {"val_loss": avg_loss, "lm_wer": lm_wer, "log": tensorboard_logs}
     
     def line_search_wer(self, dist, scores1, scores2, total_len=1):
 
