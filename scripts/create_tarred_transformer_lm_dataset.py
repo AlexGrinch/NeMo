@@ -81,6 +81,50 @@ parser.set_defaults(log=False, lower_case=False)
 args = parser.parse_args()
 
 
+from sacremoses import MosesDetokenizer, MosesPunctNormalizer, MosesTokenizer
+
+
+class EnJaProcessor:
+    """
+    Tokenizer, Detokenizer and Normalizer utilities for Japanese & English
+    Args:
+        lang_id: One of ['en', 'ja'].
+    """
+
+    def __init__(self, lang_id):
+        self.lang_id = lang_id
+        self.moses_tokenizer = MosesTokenizer(lang=lang_id)
+        self.moses_detokenizer = MosesDetokenizer(lang=lang_id)
+        self.normalizer = MosesPunctNormalizer(
+            lang=lang_id, pre_replace_unicode_punct=True, post_remove_control_chars=True
+        )
+
+    def detokenize(self, tokens):
+        """
+        Detokenizes a list of tokens
+        Args:
+            tokens: list of strings as tokens
+        Returns:
+            detokenized Japanese or English string
+        """
+        return self.moses_detokenizer.detokenize(tokens)
+
+    def tokenize(self, text):
+        """
+        Tokenizes text using Moses. Returns a string of tokens.
+        """
+        tokens = self.moses_tokenizer.tokenize(text)
+        return ' '.join(tokens)
+
+    def normalize(self, text):
+        # Normalization doesn't handle Japanese periods correctly;
+        # '。'becomes '.'.
+        if self.lang_id == 'en':
+            return self.normalizer.normalize(text)
+        else:
+            return text
+
+
 def __build_dataset_from_text(texts: str, lower_case: bool, chunk_size: int):
     if ',' in texts:
         texts = texts.split(',')
@@ -122,10 +166,11 @@ def __build_dataset_from_text(texts: str, lower_case: bool, chunk_size: int):
         yield text_dataset, num_lines
 
 
-def __tokenize_str(texts, tokenizer, max_seq_length=128):
+def __tokenize_str(texts, tokenizer, processor, max_seq_length=128):
     tokenized_text = []
     for text in texts:
-        tokens = tokenizer.text_to_ids(text)[:max_seq_length-2]
+        
+        tokens = tokenizer.text_to_ids(processor.tokenize(text))[:max_seq_length-2]
         tokens = [tokenizer.bos_id] + tokens + [tokenizer.eos_id]
         input_ids = [tokenizer.pad_id] * max_seq_length
         input_ids[: len(tokens)] = tokens
@@ -135,7 +180,7 @@ def __tokenize_str(texts, tokenizer, max_seq_length=128):
 
 
 def __tokenize_text(
-    text_paths, tokenizer, tokenized_cachedir, lower_case: bool = False,
+    text_paths, tokenizer, processor, tokenized_cachedir, lower_case: bool = False,
     chunk_size=8192, write_buffer: int = -1, max_seq_length: int = 128
 ):
     if write_buffer < 1:
@@ -176,7 +221,7 @@ def __tokenize_text(
             if (chunk_idx == write_buffer) or last_batch:
                 # write the chunks into disk after parallel tokenization
                 tokenized_data_list = parallel(
-                    joblib.delayed(__tokenize_str)(chunk, tokenizer, max_seq_length) for chunk in data_cache
+                    joblib.delayed(__tokenize_str)(chunk, tokenizer, processor, max_seq_length) for chunk in data_cache
                 )
 
                 # Sequential write cache
@@ -300,13 +345,14 @@ def main():
             "bos_token": '<BOS>',
             "eos_token": '<EOS>',
         }
-            
+
         tokenizer = get_tokenizer(
             tokenizer_name=args.tokenizer_name,
             tokenizer_model=args.tokenizer_model,
             vocab_file=args.tokenizer_vocab_file,
             special_tokens=special_tokens,
         )
+        processor = EnJaProcessor("ja")
 
         logging.info("Built tokenizer")
 
@@ -314,6 +360,7 @@ def main():
         chunk_paths, chunk_lens = __tokenize_text(
             text_paths=text_path,
             tokenizer=tokenizer,
+            processor=processor,
             tokenized_cachedir=tokenized_cachedir,
             lower_case=args.lower_case,
             chunk_size=args.chunk_size,

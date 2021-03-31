@@ -15,7 +15,7 @@
 import math
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 from omegaconf import DictConfig
@@ -31,31 +31,99 @@ from nemo.collections.nlp.modules.common.transformer import TransformerEmbedding
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.modelPT import ModelPT
 from nemo.utils import logging
+from sacrebleu import corpus_bleu
+
+from sacremoses import MosesDetokenizer, MosesPunctNormalizer, MosesTokenizer
 
 __all__ = ["TransformerLMModel"]
+
+
+class EnJaProcessor:
+    """
+    Tokenizer, Detokenizer and Normalizer utilities for Japanese & English
+    Args:
+        lang_id: One of ['en', 'ja'].
+    """
+
+    def __init__(self, lang_id: str):
+        self.lang_id = lang_id
+        self.moses_tokenizer = MosesTokenizer(lang=lang_id)
+        self.moses_detokenizer = MosesDetokenizer(lang=lang_id)
+        self.normalizer = MosesPunctNormalizer(
+            lang=lang_id, pre_replace_unicode_punct=True, post_remove_control_chars=True
+        )
+
+    def detokenize(self, tokens: List[str]) -> str:
+        """
+        Detokenizes a list of tokens
+        Args:
+            tokens: list of strings as tokens
+        Returns:
+            detokenized Japanese or English string
+        """
+        return self.moses_detokenizer.detokenize(tokens)
+
+    def tokenize(self, text) -> str:
+        """
+        Tokenizes text using Moses. Returns a string of tokens.
+        """
+        tokens = self.moses_tokenizer.tokenize(text)
+        return ' '.join(tokens)
+
+    def normalize(self, text) -> str:
+        # Normalization doesn't handle Japanese periods correctly;
+        # '。'becomes '.'.
+        if self.lang_id == 'en':
+            return self.normalizer.normalize(text)
+        else:
+            return text
 
 
 class BeamSearchDataset(torch.utils.data.Dataset):
     def __init__(self, data_path, tokenizer, max_seq_length=256):
         self.data = pd.read_csv(data_path, delimiter="\t", header=None)
         self.tokenizer = tokenizer
+        self.processor = EnJaProcessor("ja")
         self.max_seq_length = max_seq_length
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
+        
+        text = self.processor.tokenize(self.data[0][idx])
         tokens = [self.tokenizer.bos_id] + \
-            self.tokenizer.text_to_ids(str(self.data[0][idx])) + [self.tokenizer.eos_id]
+            self.tokenizer.text_to_ids(text) + [self.tokenizer.eos_id]
         input_ids = [self.tokenizer.pad_id] * self.max_seq_length
         input_ids[: len(tokens)] = tokens
         input_ids = np.array(input_ids)
         input_mask = (input_ids != self.tokenizer.pad_id).astype(np.float32)
-        score = self.data[1][idx]
-        dist = self.data[2][idx]
-        ref_len = self.data[3][idx]
-        len_in_chars = len(str(self.data[0][idx]))
-        return input_ids, input_mask, score, dist, ref_len, len_in_chars, idx
+        nmt_score = self.data[1][idx]
+        bleu_score = self.data[2][idx]
+        return input_ids, input_mask, nmt_score, bleu_score, idx
+
+
+# class BeamSearchDataset(torch.utils.data.Dataset):
+#     def __init__(self, data_path, tokenizer, max_seq_length=256):
+#         self.data = pd.read_csv(data_path, delimiter="\t", header=None)
+#         self.tokenizer = tokenizer
+#         self.max_seq_length = max_seq_length
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         tokens = [self.tokenizer.bos_id] + \
+#             self.tokenizer.text_to_ids(str(self.data[0][idx])) + [self.tokenizer.eos_id]
+#         input_ids = [self.tokenizer.pad_id] * self.max_seq_length
+#         input_ids[: len(tokens)] = tokens
+#         input_ids = np.array(input_ids)
+#         input_mask = (input_ids != self.tokenizer.pad_id).astype(np.float32)
+#         score = self.data[1][idx]
+#         dist = self.data[2][idx]
+#         ref_len = self.data[3][idx]
+#         len_in_chars = len(str(self.data[0][idx]))
+#         return input_ids, input_mask, score, dist, ref_len, len_in_chars, idx
 
 
 class TransformerLMModel(ModelPT):
@@ -159,13 +227,13 @@ class TransformerLMModel(ModelPT):
             "train_ppl": training_perplexity,
         }
         return {"loss": train_loss, "log": tensorboard_logs}
-
+    
     def validation_step(self, batch, batch_idx):
         """
         Lightning calls this inside the validation loop with the data from the validation dataloader
         passed in as `batch`.
         """
-        input_ids, input_mask, scores, dist, ref_len, len_in_chars, idxs = batch
+        input_ids, input_mask, nmt_scores, bleu_scores, idxs = batch
         
         log_probs = self(input_ids=input_ids[:,:-1], attention_mask=input_mask[:,:-1])
         val_loss = self.validation_loss(log_probs=log_probs, labels=input_ids[:,1:])
@@ -179,14 +247,12 @@ class TransformerLMModel(ModelPT):
         }
 
         return {"val_loss": val_loss,
-                "am_scores": scores,
+                "nmt_scores": nmt_scores,
                 "lm_scores": lm_scores,
-                "dist": dist,
-                "ref_len": ref_len,
-                "len_in_chars": len_in_chars,
+                "bleu_scores": bleu_scores,
                 "idxs": idxs,
                 "log": tensorboard_logs}
-
+    
     def validation_epoch_end(self, outputs):
         """
         Called at the end of validation to aggregate outputs.
@@ -197,104 +263,239 @@ class TransformerLMModel(ModelPT):
         validation_perplexity = self.validation_perplexity.compute()
 
         idxs = torch.cat([x["idxs"] for x in outputs])
-        dist = torch.cat([x["dist"] for x in outputs])
-        ref_len = torch.cat([x["ref_len"] for x in outputs])
-        len_in_chars = torch.cat([x["len_in_chars"] for x in outputs])
-        ints = torch.stack([idxs, dist, ref_len, len_in_chars])
-        
-        am_scores = torch.cat([x["am_scores"] for x in outputs])
-        lm_scores = torch.cat([x["lm_scores"] for x in outputs])
-        scores = torch.stack([am_scores, lm_scores])
 
-        all_ints, all_scores = [], []
+        nmt_scores = torch.cat([x["nmt_scores"] for x in outputs])
+        lm_scores = torch.cat([x["lm_scores"] for x in outputs])
+        bleu_scores = torch.cat([x["bleu_scores"] for x in outputs])
+        scores = torch.stack([nmt_scores, lm_scores, bleu_scores])
+
+        all_idxs, all_scores = [], []
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
             for ind in range(world_size):
-                all_ints.append(torch.empty_like(ints))
+                all_idxs.append(torch.empty_like(idxs))
                 all_scores.append(torch.empty_like(scores))
-            torch.distributed.all_gather(all_ints, ints)
+            torch.distributed.all_gather(all_idxs, idxs)
             torch.distributed.all_gather(all_scores, scores)
         else:
-            all_ints.append(ints)
+            all_idxs.append(idxs)
             all_scores.append(scores)
 
-        model_wer, ideal_wer, worst_wer, lm_wer, coef1, coef2 = 0, 0, 0, 0, 0, 0
-
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                
-            idxs, dist, ref_len, len_in_chars = torch.cat(all_ints, dim=1)
-            am_scores, lm_scores = torch.cat(all_scores, dim=1)
+            
+            all_idxs = torch.cat(all_idxs)
+            all_scores = torch.cat(all_scores, dim=1)
+            nmt_scores, lm_scores, bleu_scores = all_scores
 
-            idxs = idxs.sort()[1]
-            dist, ref_len, len_in_chars = dist[idxs], ref_len[idxs], len_in_chars[idxs]
-            am_scores, lm_scores = am_scores[idxs], lm_scores[idxs]
+            idxs = all_idxs.sort()[1]
+            nmt_scores, lm_scores, bleu_scores = nmt_scores[idxs], lm_scores[idxs], bleu_scores[idxs]
 
-            am_scores = am_scores.view(-1, self.dataset_cfg.beam_size)
+            nmt_scores = nmt_scores.view(-1, self.dataset_cfg.beam_size)
             lm_scores = lm_scores.view(-1, self.dataset_cfg.beam_size)
-            dist = dist.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
-            ref_len = ref_len.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
-            len_in_chars = len_in_chars.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
-            total_len = ref_len[:,0].sum()
+            bleu_scores = bleu_scores.view(-1, self.dataset_cfg.beam_size)
+            
+            beams = pd.read_csv(self.dataset_cfg.beams, delimiter="\t", header=None)
+            ground_truths = open(self.dataset_cfg.ground_truths, "r").readlines()
 
-            model_wer = dist[:,0].sum() / total_len
-            ideal_wer = dist.min(dim=1)[0].sum() / total_len
-            worst_wer = dist.max(dim=1)[0].sum() / total_len
-
-            coef1, wer1 = self.line_search_wer(dist, am_scores, lm_scores, total_len)
-            scores = am_scores + coef1 * lm_scores
-            coef2, lm_wer = self.line_search_wer(dist, scores, len_in_chars, total_len)
-
-            model_wer, ideal_wer, worst_wer = model_wer.item(), ideal_wer.item(), worst_wer.item()
+            if len(ground_truths) == bleu_scores.shape[0]:
+                best_bleu = self.compute_bleu(bleu_scores, beams, ground_truths)
+                nmt_bleu = self.compute_bleu(nmt_scores, beams, ground_truths)
+                coef = self.line_search_bleu(nmt_scores, lm_scores, bleu_scores)
+                nmt_lm_scores = nmt_scores + coef * lm_scores
+                nmt_lm_bleu = self.compute_bleu(nmt_lm_scores, beams, ground_truths)
+            else:
+                best_bleu = 0
+                nmt_bleu = 0
+                nmt_lm_bleu = 0
 
             logging.info("\n\n\n\n")
-            logging.info(f"     AM+n_gram WER: {np.round(model_wer * 100, 2)}")
-            logging.info(f" +LM rescoring WER: {np.round(lm_wer * 100, 2)}")
-            logging.info(f" Best possible WER: {np.round(ideal_wer * 100, 2)}")
+            logging.info(f"NMT BLEU: {np.round(nmt_bleu, 2)}")
+            logging.info(f"+LM BLEU: {np.round(nmt_lm_bleu, 2)}")
+            logging.info(f"BestBLEU: {np.round(best_bleu, 2)}")
 
         tensorboard_logs = {
             "val_loss": avg_loss,
             "val_ppl": validation_perplexity,
-            "model_wer": model_wer,
-            "ideal_wer": ideal_wer,
-            "worst_wer": worst_wer,
-            "lm_wer": lm_wer,
-            "neural_lm_coef": coef1,
-            "len_in_chars_coef": coef2,
         }
 
-        return {"val_loss": avg_loss, "lm_wer": lm_wer, "log": tensorboard_logs}
+        return {"val_loss": avg_loss, "log": tensorboard_logs}
     
-    def line_search_wer(self, dist, scores1, scores2, total_len=1):
+    def line_search_bleu(self, scores1, scores2, bleu_scores):
 
         scale = scores1.mean().abs().item() / scores2.mean().abs().item()
         left = self.dataset_cfg.coef_range[0] * scale
         right = self.dataset_cfg.coef_range[1] * scale
         coefs = np.linspace(left, right, self.dataset_cfg.coef_steps)
 
-        best_wer = 10000
+        best_bleu = 0
         best_coef = left
         for coef in coefs:
             scores = scores1 + coef * scores2
             indices = scores.max(dim=1, keepdim=True)[1]
-            wer = dist.gather(dim=1, index=indices).sum() / total_len
-            wer = wer.item()
-            if wer < best_wer:
-                best_wer = wer
+            bleu = bleu_scores.gather(dim=1, index=indices).mean()
+            if bleu > best_bleu:
+                best_bleu = bleu
                 best_coef = coef
-        return best_coef, best_wer
+        return best_coef
+    
+    def compute_bleu(self, scores, beams, ground_truths):
+        ids = scores.max(dim=1)[1].cpu().numpy()
+        ids = np.arange(len(ground_truths)) * self.dataset_cfg.beam_size + ids
+        preds = list(beams[0].values[ids])
+        bleu = corpus_bleu(preds, [ground_truths], tokenize="ja-mecab").score
+        return bleu
+    
+
+#     def validation_step(self, batch, batch_idx):
+#         """
+#         Lightning calls this inside the validation loop with the data from the validation dataloader
+#         passed in as `batch`.
+#         """
+#         input_ids, input_mask, scores, dist, ref_len, len_in_chars, idxs = batch
+        
+#         log_probs = self(input_ids=input_ids[:,:-1], attention_mask=input_mask[:,:-1])
+#         val_loss = self.validation_loss(log_probs=log_probs, labels=input_ids[:,1:])
+#         self.validation_perplexity(logits=log_probs)
+        
+#         target_log_probs = log_probs.gather(2, input_ids[:, 1:].unsqueeze(2)).squeeze(2)
+#         lm_scores = torch.sum(target_log_probs * input_mask[:, :-1], dim=-1)
+
+#         tensorboard_logs = {
+#             "val_loss": val_loss,
+#         }
+
+#         return {"val_loss": val_loss,
+#                 "am_scores": scores,
+#                 "lm_scores": lm_scores,
+#                 "dist": dist,
+#                 "ref_len": ref_len,
+#                 "len_in_chars": len_in_chars,
+#                 "idxs": idxs,
+#                 "log": tensorboard_logs}
+
+#     def validation_epoch_end(self, outputs):
+#         """
+#         Called at the end of validation to aggregate outputs.
+#         :param outputs: list of individual outputs of each validation step.
+#         """
+
+#         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+#         validation_perplexity = self.validation_perplexity.compute()
+
+#         idxs = torch.cat([x["idxs"] for x in outputs])
+#         dist = torch.cat([x["dist"] for x in outputs])
+#         ref_len = torch.cat([x["ref_len"] for x in outputs])
+#         len_in_chars = torch.cat([x["len_in_chars"] for x in outputs])
+#         ints = torch.stack([idxs, dist, ref_len, len_in_chars])
+        
+#         am_scores = torch.cat([x["am_scores"] for x in outputs])
+#         lm_scores = torch.cat([x["lm_scores"] for x in outputs])
+#         scores = torch.stack([am_scores, lm_scores])
+
+#         all_ints, all_scores = [], []
+#         if torch.distributed.is_initialized():
+#             world_size = torch.distributed.get_world_size()
+#             for ind in range(world_size):
+#                 all_ints.append(torch.empty_like(ints))
+#                 all_scores.append(torch.empty_like(scores))
+#             torch.distributed.all_gather(all_ints, ints)
+#             torch.distributed.all_gather(all_scores, scores)
+#         else:
+#             all_ints.append(ints)
+#             all_scores.append(scores)
+
+#         model_wer, ideal_wer, worst_wer, lm_wer, coef1, coef2 = 0, 0, 0, 0, 0, 0
+
+#         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            
+#             all_ints = torch.cat(all_ints, dim=1)
+#             cap_at = (all_ints.shape[1] // self.dataset_cfg.beam_size) * self.dataset_cfg.beam_size
+#             all_ints = all_ints[:, :cap_at]
+#             all_scores = torch.cat(all_scores, dim=1)[:, :cap_at]
+                
+#             idxs, dist, ref_len, len_in_chars = all_ints
+#             am_scores, lm_scores = all_scores
+
+#             idxs = idxs.sort()[1]
+#             dist, ref_len, len_in_chars = dist[idxs], ref_len[idxs], len_in_chars[idxs]
+#             am_scores, lm_scores = am_scores[idxs], lm_scores[idxs]
+
+#             am_scores = am_scores.view(-1, self.dataset_cfg.beam_size)
+#             lm_scores = lm_scores.view(-1, self.dataset_cfg.beam_size)
+#             dist = dist.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
+#             ref_len = ref_len.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
+#             len_in_chars = len_in_chars.view(-1, self.dataset_cfg.beam_size).to(am_scores.dtype)
+#             total_len = ref_len[:,0].sum()
+
+#             model_wer = dist[:,0].sum() / total_len
+#             ideal_wer = dist.min(dim=1)[0].sum() / total_len
+#             worst_wer = dist.max(dim=1)[0].sum() / total_len
+
+#             coef1, wer1 = self.line_search_wer(dist, am_scores, lm_scores, total_len)
+#             scores = am_scores + coef1 * lm_scores
+#             coef2, lm_wer = self.line_search_wer(dist, scores, len_in_chars, total_len)
+
+#             model_wer, ideal_wer, worst_wer = model_wer.item(), ideal_wer.item(), worst_wer.item()
+
+#             alpha, beta = 0.749, 0.412 #0, 0 #self.dataset_cfg.dev_coeffs
+#             coeff_wer = self.compute_wer(dist, am_scores + alpha * lm_scores + beta * len_in_chars, total_len)
+            
+#             logging.info("\n\n\n\n")
+#             logging.info(f"     AM+n_gram WER: {np.round(model_wer * 100, 2)}")
+#             logging.info(f" +LM rescoring WER: {np.round(lm_wer * 100, 2)}")
+#             logging.info(f"dev_other_coeffs WER: {np.round(coeff_wer * 100, 2)}")
+#             logging.info(f" Best possible WER: {np.round(ideal_wer * 100, 2)}")
+#             logging.info(f"     Fusion coeffs: {np.round(coef1, 3)} {np.round(coef2, 3)}")
+
+#         tensorboard_logs = {
+#             "val_loss": avg_loss,
+#             "val_ppl": validation_perplexity,
+#             "model_wer": model_wer,
+#             "ideal_wer": ideal_wer,
+#             "worst_wer": worst_wer,
+#             "lm_wer": lm_wer,
+#             "neural_lm_coef": coef1,
+#             "len_in_chars_coef": coef2,
+#         }
+
+#         return {"val_loss": avg_loss, "lm_wer": lm_wer, "log": tensorboard_logs}
+    
+#     def line_search_wer(self, dist, scores1, scores2, total_len=1):
+
+#         scale = scores1.mean().abs().item() / scores2.mean().abs().item()
+#         left = self.dataset_cfg.coef_range[0] * scale
+#         right = self.dataset_cfg.coef_range[1] * scale
+#         coefs = np.linspace(left, right, self.dataset_cfg.coef_steps)
+
+#         best_wer = 10000
+#         best_coef = left
+#         for coef in coefs:
+#             scores = scores1 + coef * scores2
+#             wer = self.compute_wer(dist, scores, total_len)
+#             if wer < best_wer:
+#                 best_wer = wer
+#                 best_coef = coef
+#         return best_coef, best_wer
+    
+#     def compute_wer(self, dist, scores, total_len):
+#         indices = scores.max(dim=1, keepdim=True)[1]
+#         wer = dist.gather(dim=1, index=indices).sum() / total_len
+#         wer = wer.item()
+#         return wer
 
     def test_step(self, batch, batch_idx):
         """
         Lightning calls this inside the test loop with the data from the test dataloader
         passed in as `batch`.
         """
-        output_dict = self.validation_step(batch, batch_idx)
-        result = {"test_loss": output_dict['val_loss'], "log": {}}
-        for k, v in output_dict['log'].items():
-            new_k = k.replace("val", "test")
-            result['log'][new_k] = v
+#         output_dict = self.validation_step(batch, batch_idx)
+#         result = {"test_loss": output_dict['val_loss'], "log": {}}
+#         for k, v in output_dict['log'].items():
+#             new_k = k.replace("val", "test")
+#             result['log'][new_k] = v
 
-        return result
+#         return result
+        return self.validation_step(batch, batch_idx)
 
     def test_epoch_end(self, outputs):
         """
@@ -302,10 +503,11 @@ class TransformerLMModel(ModelPT):
         :param outputs: list of individual outputs of each test step.
         """
 
-        avg_loss = torch.stack([x["test_loss"] for x in outputs]).mean()
-        validation_perplexity = self.validation_perplexity.compute()
-        tensorboard_logs = {"test_loss": avg_loss, "test_ppl": validation_perplexity}
-        return {"test_loss": avg_loss, "log": tensorboard_logs}
+#         avg_loss = torch.stack([x["test_loss"] for x in outputs]).mean()
+#         validation_perplexity = self.validation_perplexity.compute()
+#         tensorboard_logs = {"test_loss": avg_loss, "test_ppl": validation_perplexity}
+#         return {"test_loss": avg_loss, "log": tensorboard_logs}
+        return self.validation_epoch_end(outputs)
 
     def setup_training_data(self, train_data_config: Optional[DictConfig]):
         self._train_dl = self._setup_dataloader_from_config(cfg=train_data_config)
@@ -329,9 +531,19 @@ class TransformerLMModel(ModelPT):
         )
 
     def setup_test_data(self, test_data_config: Optional[DictConfig]):
-        self._test_dl = self._setup_dataloader_from_config(
+        self._test_dl = self._setup_val_dataloader(
             cfg=test_data_config, predict_last_k=self.dataset_cfg.get("predict_last_k", 0),
         )
+        
+#     def setup_validation_data(self, val_data_config: Optional[DictConfig]):
+#         self._validation_dl = self._setup_dataloader_from_config(
+#             cfg=val_data_config, predict_last_k=self.dataset_cfg.get("predict_last_k", 0),
+#         )
+
+#     def setup_test_data(self, test_data_config: Optional[DictConfig]):
+#         self._test_dl = self._setup_dataloader_from_config(
+#             cfg=test_data_config, predict_last_k=self.dataset_cfg.get("predict_last_k", 0),
+#         )
         
     def _setup_val_dataloader(self, cfg: DictConfig, predict_last_k=0):
         dataset = BeamSearchDataset(
