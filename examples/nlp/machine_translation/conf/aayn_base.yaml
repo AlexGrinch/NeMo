@@ -6,16 +6,16 @@ model:
   beam_size: 4
   len_pen: 0.6
   multilingual: False
-  max_generation_delta: 5
+  max_generation_delta: 20
   label_smoothing: 0.1
-  shared_tokenizer: True # train tokenizer model across src and tgt train data
+  shared_tokenizer: False # train tokenizer model across src and tgt train data
   preproc_out_dir: null # path to store data preprocessing outputs
   src_language: 'en'
-  tgt_language: 'de'
+  tgt_language: 'ru'
 
   train_ds:
-    src_file_name: null
-    tgt_file_name: null
+    src_file_name: /workspace/datasets/wmt2021/dev/finetune/train.en-ru.clean.tok.en
+    tgt_file_name: /workspace/datasets/wmt2021/dev/finetune/train.en-ru.clean.tok.ru
     use_tarred_dataset: False # if true tar_file_name and meta_file_name will be used (or created automatically) 
     # config for preprocessing training data and creating a tarred datset automatically
     tar_file_prefix: parallel # prefix for tar file names
@@ -26,7 +26,7 @@ model:
     tar_shuffle_n: 100 # How many samples to look ahead and load to be shuffled
     shard_strategy: scatter # tarred dataset shard distribution strategy
     n_preproc_jobs: -2 # number of processes to use for data preprocessing (-2 means all but 2)
-    tokens_in_batch: 512
+    tokens_in_batch: 2048
     clean: true
     max_seq_length: 512
     shuffle: true
@@ -39,8 +39,8 @@ model:
     concat_sampling_probabilities: null # only used with ConcatTranslationDataset 
 
   validation_ds:
-    src_file_name: ???
-    tgt_file_name: ???
+    src_file_name: /workspace/datasets/wmt2021/dev/finetune/small.en-ru.en
+    tgt_file_name: /workspace/datasets/wmt2021/dev/finetune/small.en-ru.ru
     tokens_in_batch: 512
     clean: false
     max_seq_length: 512
@@ -51,8 +51,8 @@ model:
     num_workers: 8
 
   test_ds:
-    src_file_name: ???
-    tgt_file_name: ???
+    src_file_name: /workspace/datasets/wmt2021/dev/finetune/small.en-ru.en
+    tgt_file_name: /workspace/datasets/wmt2021/dev/finetune/small.en-ru.ru
     tokens_in_batch: 512
     clean: false
     max_seq_length: 512
@@ -64,34 +64,36 @@ model:
 
   optim:
     name: adam
-    lr: 0.001
+    lr: 0.00001
     betas:
       - 0.9
       - 0.98
     weight_decay: 0.0
     sched:
-      name: InverseSquareRootAnnealing
+      name: WarmupAnnealing
       min_lr: 0.0
       last_epoch: -1
       warmup_ratio: 0.1
 
   encoder_tokenizer:
     library: yttm
-    tokenizer_model: null
+    tokenizer_model: /workspace/models/nmt/wmt21_en_ru/8d268c05bcc6479eac688e4f38e26876_tokenizer.encoder.16384.BPE.model
     vocab_size: null # vocab size for training bpe
     bpe_dropout: null
     vocab_file: null
     special_tokens: null
     training_sample_size: null # valid for sentencepiece tokenizer
+    r2l: false
 
   decoder_tokenizer:
     library: yttm
-    tokenizer_model: null
+    tokenizer_model: /workspace/models/nmt/wmt21_en_ru/f907ac7fc27f460f9dda9a1dd9cf2f88_tokenizer.decoder.16384.BPE.model
     vocab_size: null # vocab size for training bpe
     bpe_dropout: null
     vocab_file: null
     special_tokens: null
     training_sample_size: null # valid for sentencepiece tokenizer
+    r2l: false
 
   encoder:
     library: nemo
@@ -99,15 +101,15 @@ model:
     pretrained: false
     max_sequence_length: 512
     num_token_types: 0
-    embedding_dropout: 0.1
+    embedding_dropout: 0.2
     learn_positional_encodings: false
-    hidden_size: 512
-    num_layers: 6
-    inner_size: 2048
-    num_attention_heads: 8
-    ffn_dropout: 0.1
-    attn_score_dropout: 0.1
-    attn_layer_dropout: 0.1
+    hidden_size: 1024
+    num_layers: 24
+    inner_size: 4096
+    num_attention_heads: 16
+    ffn_dropout: 0.2
+    attn_score_dropout: 0.2
+    attn_layer_dropout: 0.2
     hidden_act: relu
     mask_future: false
     pre_ln: false
@@ -119,15 +121,15 @@ model:
     pretrained: false
     max_sequence_length: 512
     num_token_types: 0
-    embedding_dropout: 0.1
+    embedding_dropout: 0.2
     learn_positional_encodings: false
-    hidden_size: 512
-    inner_size: 2048
+    hidden_size: 1024
+    inner_size: 4096
     num_layers: 6
-    num_attention_heads: 8
-    ffn_dropout: 0.1
-    attn_score_dropout: 0.1
-    attn_layer_dropout: 0.1
+    num_attention_heads: 16
+    ffn_dropout: 0.2
+    attn_score_dropout: 0.2
+    attn_layer_dropout: 0.2
     hidden_act: relu
     pre_ln: false
     pre_ln_final_layer_norm: true
@@ -142,14 +144,14 @@ model:
 trainer:
   gpus: 4
   num_nodes: 1
-  max_epochs: 200
+  max_epochs: 4
   amp_level: O2 # O1/O2 for mixed precision
   precision: 16 # Should be set to 16 for O1 and O2, default is 16 as PT ignores it when am_level is O0
   accelerator: ddp
   checkpoint_callback: False
   logger: False
   log_every_n_steps: 50  # Interval of logging.
-  check_val_every_n_epoch: 1
+  val_check_interval: 50
 
 exp_manager:
   name: AAYNBase

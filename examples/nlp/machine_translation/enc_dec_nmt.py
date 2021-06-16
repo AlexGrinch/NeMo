@@ -15,6 +15,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 
 from nemo.collections.nlp.data.machine_translation.preproc_mt_data import MTDataPreproc
@@ -104,7 +105,7 @@ def main(cfg: MTEncDecConfig) -> None:
     default_cfg = MTEncDecConfig()
     cfg = update_model_config(default_cfg, cfg)
     logging.info("\n\n************** Experiment configuration ***********")
-    logging.info(f'Config: {cfg.pretty()}')
+    logging.info(f'Config: {OmegaConf.to_yaml(cfg)}')
 
     # training is managed by PyTorch Lightning
     trainer = Trainer(**cfg.trainer)
@@ -118,7 +119,18 @@ def main(cfg: MTEncDecConfig) -> None:
     exp_manager(trainer, cfg.exp_manager)
 
     # everything needed to train translation models is encapsulated in the NeMo MTEncdDecModel
-    mt_model = MTEncDecModel(cfg.model, trainer=trainer)
+    #mt_model = MTEncDecModel(cfg.model, trainer=trainer)
+    mt_model = MTEncDecModel.restore_from(
+        restore_path="/workspace/models/nmt/wmt21_en_ru/submit/enru_1.nemo",
+        map_location=f"cuda:{trainer.local_rank}")
+    mt_model.train()
+    mt_model.world_size = trainer.num_nodes * trainer.num_gpus
+    mt_model.src_language = cfg.model.get("src_language", 'en')
+    mt_model.tgt_language = cfg.model.get("tgt_language", 'ru')
+    mt_model.setup_pre_and_post_processing_utils(source_lang=mt_model.src_language, target_lang=mt_model.tgt_language)
+    mt_model.setup_training_data(cfg.model.train_ds)
+    mt_model.setup_validation_data(cfg.model.validation_ds)
+    mt_model.setup_optimization(cfg.model.optim)
 
     logging.info("\n\n************** Model parameters and their sizes ***********")
     for name, param in mt_model.named_parameters():
