@@ -18,6 +18,7 @@ import tempfile
 from math import ceil
 from typing import Dict, List, Optional, Union
 
+import math
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
@@ -30,6 +31,9 @@ from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.parts.mixins import ASRModuleMixin
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
+from nemo.collections.common.parts import transformer_weights_init
+from nemo.collections.nlp.modules.common import TokenClassifier
+from nemo.collections.nlp.modules.common.lm_utils import get_transformer
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType
 from nemo.utils import logging
@@ -162,28 +166,58 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin):
             if "feat_in" not in self._cfg.decoder or not self._cfg.decoder.feat_in:
                 raise ValueError("param feat_in of the decoder's config is not set!")
 
-        self.decoder = EncDecCTCModel.from_config_dict(self._cfg.decoder)
+        if self._cfg.get("use_ctc", True):
+            self.decoder = EncDecCTCModel.from_config_dict(self._cfg.decoder)
 
-        self.loss = CTCLoss(
-            num_classes=self.decoder.num_classes_with_blank - 1,
-            zero_infinity=True,
-            reduction=self._cfg.get("ctc_reduction", "mean_batch"),
-        )
+            self.loss = CTCLoss(
+                num_classes=self.decoder.num_classes_with_blank - 1,
+                zero_infinity=True,
+                reduction=self._cfg.get("ctc_reduction", "mean_batch"),
+            )
+
+            # Setup metric objects
+            self._wer = WER(
+                vocabulary=self.decoder.vocabulary,
+                batch_dim_index=0,
+                use_cer=self._cfg.get('use_cer', False),
+                ctc_decode=True,
+                dist_sync_on_step=True,
+                log_prediction=self._cfg.get("log_prediction", False),
+            )
+        else:
+            vocab_size = 8 * math.ceil(self.tokenizer.vocab_size / 8)
+            decoder_cfg_dict = OmegaConf.to_container(cfg.get('decoder'))
+            decoder_cfg_dict['vocab_size'] = vocab_size
+            library = decoder_cfg_dict.pop('library', 'nemo')
+            model_name = decoder_cfg_dict.pop('model_name', None)
+            pretrained = decoder_cfg_dict.pop('pretrained', False)
+            
+            self.decoder = get_transformer(
+                library=library,
+                model_name=model_name,
+                pretrained=pretrained,
+                config_dict=decoder_cfg_dict,
+                encoder=False,
+                pre_ln_final_layer_norm=decoder_cfg_dict.get('pre_ln_final_layer_norm', False),
+            )
+
+            self.log_softmax = TokenClassifier(
+                hidden_size=self.decoder.hidden_size,
+                num_classes=vocab_size,
+                activation=self._cfg.head.activation,
+                log_softmax=self._cfg.head.log_softmax,
+                dropout=self._cfg.head.dropout,
+                use_transformer_init=self._cfg.head.use_transformer_init,
+            )
+            
+            std_init_range = 1 / self.decoder.hidden_size ** 0.5
+            self.decoder.apply(lambda module: transformer_weights_init(module, std_init_range))
+            self.log_softmax.apply(lambda module: transformer_weights_init(module, std_init_range))
 
         if hasattr(self._cfg, 'spec_augment') and self._cfg.spec_augment is not None:
             self.spec_augmentation = EncDecCTCModel.from_config_dict(self._cfg.spec_augment)
         else:
             self.spec_augmentation = None
-
-        # Setup metric objects
-        self._wer = WER(
-            vocabulary=self.decoder.vocabulary,
-            batch_dim_index=0,
-            use_cer=self._cfg.get('use_cer', False),
-            ctc_decode=True,
-            dist_sync_on_step=True,
-            log_prediction=self._cfg.get("log_prediction", False),
-        )
 
     @torch.no_grad()
     def transcribe(

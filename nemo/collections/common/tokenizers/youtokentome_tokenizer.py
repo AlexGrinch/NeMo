@@ -16,7 +16,7 @@ from pathlib import Path
 
 import youtokentome as yttm
 
-from nemo.collections.common.tokenizers import TokenizerSpec
+from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 
 __all__ = ['YouTokenToMeTokenizer']
 

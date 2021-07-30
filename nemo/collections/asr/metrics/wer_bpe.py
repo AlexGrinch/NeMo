@@ -115,6 +115,8 @@ class WERBPE(Metric):
                 if (p != previous or previous == self.blank_id) and p != self.blank_id:
                     decoded_prediction.append(p)
                 previous = p
+                if p == self.tokenizer.eos_id:
+                    break
 
             text = self.decode_tokens_to_str(decoded_prediction)
 
@@ -182,7 +184,8 @@ class WERBPE(Metric):
             if self.ctc_decode:
                 hypotheses = self.ctc_decoder_predictions_tensor(predictions, predictions_lengths)
             else:
-                raise NotImplementedError("Implement me if you need non-CTC decode on predictions")
+                hypotheses = self.ctc_decoder_predictions_tensor(predictions, predictions_lengths)
+                #raise NotImplementedError("Implement me if you need non-CTC decode on predictions")
 
         if self.log_prediction:
             logging.info(f"\n")
