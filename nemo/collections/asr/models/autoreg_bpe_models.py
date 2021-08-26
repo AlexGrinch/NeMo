@@ -112,6 +112,8 @@ class EncDecAutoregModelBPE(EncDecCTCModel, ASRBPEMixin):
             reduction=self._cfg.get("ctc_reduction", "mean_batch"),
         )
 
+        self.ctc_coef = self._cfg.get("ctc_coef", 0.5)
+
         # Setup metric objects
         self._wer = WERBPE(
             tokenizer=self.tokenizer,
@@ -372,7 +374,7 @@ class EncDecAutoregModelBPE(EncDecCTCModel, ASRBPEMixin):
             input_lengths=encoded_len, target_lengths=transcript_len
         )
 
-        loss_value = 0.5 * (autoreg_loss + ctc_loss)
+        loss_value = self.ctc_coef * ctc_loss + (1 - self.ctc_coef) * autoreg_loss
 
         tensorboard_logs = {'train_loss': loss_value, 'learning_rate': self._optimizer.param_groups[0]['lr']}
 

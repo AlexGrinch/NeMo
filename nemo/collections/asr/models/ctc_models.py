@@ -209,6 +209,8 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin):
                 dropout=self._cfg.head.dropout,
                 use_transformer_init=self._cfg.head.use_transformer_init,
             )
+
+            self.log_softmax.mlp.layer0.weight = self.decoder.embedding.token_embedding.weight
             
             std_init_range = 1 / self.decoder.hidden_size ** 0.5
             self.decoder.apply(lambda module: transformer_weights_init(module, std_init_range))
