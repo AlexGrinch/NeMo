@@ -489,14 +489,7 @@ class AudioToCharWithDursF0Dataset(AudioToCharDataset):
         text = self.id2enc_text[item]
         text, text_len = torch.tensor(text).long(), torch.tensor(len(text)).long()
         durs, f0 = self.durs[item], self.f0[item]
-        return (
-            audio,
-            audio_len,
-            text,
-            text_len,
-            durs,
-            f0,
-        )
+        return (audio, audio_len, text, text_len, durs, f0)
 
     @staticmethod
     def merge(tensors, dim=0, value=0, dtype=None):
@@ -516,7 +509,7 @@ class AudioToCharWithDursF0Dataset(AudioToCharDataset):
     def repeat_merge(cls, x, reps, pad):
         """Repeats `x` values according to `reps` tensor and merges."""
         return cls.merge(
-            tensors=[torch.repeat_interleave(text1, durs1) for text1, durs1 in zip(x, reps)], value=pad, dtype=x.dtype,
+            tensors=[torch.repeat_interleave(text1, durs1) for text1, durs1 in zip(x, reps)], value=pad, dtype=x.dtype
         )
 
     @staticmethod
@@ -547,7 +540,7 @@ class AudioToCharWithDursF0Dataset(AudioToCharDataset):
         if self.blanking:
             text = [
                 self.interleave(
-                    x=torch.empty(len(t) + 1, dtype=torch.long, device=t.device).fill_(self.vocab.blank), y=t,
+                    x=torch.empty(len(t) + 1, dtype=torch.long, device=t.device).fill_(self.vocab.blank), y=t
                 )
                 for t in text
             ]
@@ -559,15 +552,7 @@ class AudioToCharWithDursF0Dataset(AudioToCharDataset):
         f0_mask = self.make_mask([f.shape[-1] for f in f0])  # noqa
         f0 = self.merge(f0, dtype=torch.float)
 
-        return (
-            audio,
-            audio_len,
-            text,
-            text_len,
-            durs,
-            f0,
-            f0_mask,
-        )
+        return (audio, audio_len, text, text_len, durs, f0, f0_mask)
 
 
 class AudioToCharWithPriorDataset(AudioToCharDataset):
@@ -866,17 +851,16 @@ class AudioToBPEDataset(_AudioTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
     ):
-        if use_start_end_token and hasattr(tokenizer, 'bos_token'):
-            bos_id = tokenizer.bos_id
-        else:
-            bos_id = None
 
-        if use_start_end_token and hasattr(tokenizer, 'eos_token'):
-            eos_id = tokenizer.eos_id
-        else:
-            eos_id = None
+        bos_id = None
+        eos_id = None
+        if use_start_end_token:
+            if hasattr(tokenizer, 'bos_token') or hasattr(tokenizer, 'bos_id'):
+                bos_id = tokenizer.bos_id
+            if hasattr(tokenizer, 'eos_token') or hasattr(tokenizer, 'eos_id'):
+                eos_id = tokenizer.eos_id
 
-        if hasattr(tokenizer, 'pad_token'):
+        if hasattr(tokenizer, 'pad_token') or hasattr(tokenizer, 'pad_id'):
             pad_id = tokenizer.pad_id
         else:
             pad_id = 0
@@ -1454,9 +1438,7 @@ class BucketingDataset(IterableDataset):
         bucketing_batch_size (int): Number of samples to build a batch
     """
 
-    def __init__(
-        self, dataset: IterableDataset, bucketing_batch_size: int,
-    ):
+    def __init__(self, dataset: IterableDataset, bucketing_batch_size: int):
         self.wrapped_dataset = dataset
         self.bucketing_batch_size = bucketing_batch_size
         super().__init__()

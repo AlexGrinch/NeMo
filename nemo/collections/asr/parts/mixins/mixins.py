@@ -59,10 +59,10 @@ class ASRBPEMixin(ABC):
                 with open_dict(self.cfg.tokenizer):
                     self.cfg.tokenizer.hf_kwargs = tokenizer_cfg.get('hf_kwargs')
 
-        if self.tokenizer_type not in ['bpe', 'wpe']:
+        if self.tokenizer_type not in ['bpe', 'wpe', 'yttm']:
             raise ValueError(
-                "`tokenizer.type` must be either `bpe` for SentencePiece tokenizer or "
-                "`wpe` for BERT based tokenizer"
+                "`tokenizer.type` must be either `bpe` for SentencePiece tokenizer,"
+                "`wpe` for BERT based tokenizer or `yttm` for YouTokenToMe tokenizer"
             )
 
         if self.tokenizer_type == 'bpe':
@@ -116,7 +116,7 @@ class ASRBPEMixin(ABC):
             self.tokenizer.tokenizer.get_vocab = get_vocab
             self.tokenizer.tokenizer.all_special_tokens = self.tokenizer.special_token_to_id
 
-        else:
+        elif self.tokenizer_type == 'wpe':
             # This is a WPE Tokenizer
             # If path from previous registration exists, remove it
             if 'vocab_path' in self.tokenizer_cfg:
@@ -142,6 +142,21 @@ class ASRBPEMixin(ABC):
                 unk_token=self.hf_tokenizer_kwargs.get('unk_token', None),
                 use_fast=self.hf_tokenizer_kwargs.get('use_fast', False),
             )
+
+        else:
+            # This is a YouTokenToMe BPE Tokenizer
+            self.tokenizer = tokenizers.YouTokenToMeTokenizer(model_path=self.tokenizer_cfg.get('model_path'))
+
+            vocabulary = {}
+            for i, piece in enumerate(self.tokenizer.tokenizer.vocab()):
+                vocabulary[piece] = i
+
+            # wrapper method to get vocabulary conveniently
+            def get_vocab():
+                return vocabulary
+
+            self.tokenizer.tokenizer.vocab_size = len(vocabulary)
+            self.tokenizer.tokenizer.get_vocab = get_vocab
 
         logging.info(
             "Tokenizer {} initialized with {} tokens".format(

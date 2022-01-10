@@ -22,6 +22,7 @@ try:
     from nemo.collections.asr.models.label_models import EncDecSpeakerLabelModel, ExtractSpeakerEmbeddingsModel
     from nemo.collections.asr.models.rnnt_bpe_models import EncDecRNNTBPEModel
     from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
+    from nemo.collections.asr.models.transformer_bpe_models import EncDecTransfModelBPE
 except ModuleNotFoundError:
     from nemo.utils.exceptions import CheckInstall
 
