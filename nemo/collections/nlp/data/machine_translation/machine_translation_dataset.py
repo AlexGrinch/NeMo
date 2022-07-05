@@ -130,7 +130,9 @@ class TranslationDataset(Dataset):
         self.src_pad_id = tokenizer_src.pad_id
         self.tgt_pad_id = tokenizer_tgt.pad_id
 
-        self.batch_indices = self.pack_data_into_batches(src_ids, tgt_ids)
+        #self.batch_indices = self.pack_data_into_batches(src_ids, tgt_ids)
+        num_sentences = self.tokens_in_batch * (len(src_ids) // self.tokens_in_batch)
+        self.batch_indices = np.arange(num_sentences).reshape(-1, self.tokens_in_batch).tolist()
         self.batches = self.pad_batches(src_ids, tgt_ids, self.batch_indices)
 
     def __len__(self):

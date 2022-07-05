@@ -456,17 +456,16 @@ class AudioToBPEDataset(_AudioTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
     ):
-        if use_start_end_token and hasattr(tokenizer, 'bos_token'):
-            bos_id = tokenizer.bos_id
-        else:
-            bos_id = None
+        bos_id = None
+        eos_id = None
 
-        if use_start_end_token and hasattr(tokenizer, 'eos_token'):
-            eos_id = tokenizer.eos_id
-        else:
-            eos_id = None
+        if use_start_end_token:
+            if hasattr(tokenizer, 'bos_token') or hasattr(tokenizer, 'bos_id'):
+                bos_id = tokenizer.bos_id
+            if hasattr(tokenizer, 'eos_token') or hasattr(tokenizer, 'eos_id'):
+                eos_id = tokenizer.eos_id
 
-        if hasattr(tokenizer, 'pad_token'):
+        if hasattr(tokenizer, 'pad_token') or hasattr(tokenizer, 'pad_id'):
             pad_id = tokenizer.pad_id
         else:
             pad_id = 0
@@ -995,17 +994,16 @@ class TarredAudioToBPEDataset(_TarredAudioToTextDataset):
         world_size: int = 0,
         return_sample_id: bool = False,
     ):
-        if use_start_end_token and hasattr(tokenizer, 'bos_token'):
-            bos_id = tokenizer.bos_id
-        else:
-            bos_id = None
+        bos_id = None
+        eos_id = None
 
-        if use_start_end_token and hasattr(tokenizer, 'eos_token'):
-            eos_id = tokenizer.eos_id
-        else:
-            eos_id = None
+        if use_start_end_token:
+            if hasattr(tokenizer, 'bos_token') or hasattr(tokenizer, 'bos_id'):
+                bos_id = tokenizer.bos_id
+            if hasattr(tokenizer, 'eos_token') or hasattr(tokenizer, 'eos_id'):
+                eos_id = tokenizer.eos_id
 
-        if hasattr(tokenizer, 'pad_token'):
+        if hasattr(tokenizer, 'pad_token') or hasattr(tokenizer, 'pad_id'):
             pad_id = tokenizer.pad_id
         else:
             pad_id = 0
