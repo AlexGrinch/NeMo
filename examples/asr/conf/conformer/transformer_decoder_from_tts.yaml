@@ -34,13 +34,10 @@ model:
   ctc_reduction: 'mean_batch'
 
   train_ds:
-#     manifest_filepath: /raid/datasets/iwslt22/st/en_de/tarred/tarred_audio_manifest.json
-#     tarred_audio_filepaths: /raid/datasets/iwslt22/st/en_de/tarred/audio__OP_0..1_CL_.tar
-#     is_tarred: true
     use_tarred_dataset: true
     tar_file_prefix: text
-    tar_files: /workspace/datasets/tarred_playground/text/tarred/text.batches.tokens.8._OP_0..15_CL_.tar
-    metadata_file: /workspace/datasets/tarred_playground/text/tarred/metadata.tokens.8.json
+    tar_files: /workspace/datasets/tarred_playground/text/tarred5M/text.batches.tokens.8._OP_0..127_CL_.tar
+    metadata_file: /workspace/datasets/tarred_playground/text/tarred5M/metadata.tokens.8.json
     lines_per_dataset_fragment: 1000000 # Number of lines to consider for bucketing and padding
     num_batches_per_tarfile: 100 # Number of batches (pickle files) within each tarfile
     tar_shuffle_n: 100 # How many samples to look ahead and load to be shuffled
@@ -95,7 +92,7 @@ model:
 
   decoder_tokenizer:
     library: yttm
-    tokenizer_model: /workspace/datasets/tarred_playground/text/ende_4k.yttm
+    tokenizer_model: /workspace/datasets/iwslt22/tokenizers/end2end/de_16k.yttm
     vocab_size: null # vocab size for training bpe
     bpe_dropout: null
     vocab_file: null
@@ -128,6 +125,7 @@ model:
     
   tts_model:
     model_path: /workspace/models/tts/16k/FastPitch16k.nemo
+    speakers_path: /workspace/models/tts/speakers_train_100.txt
 
   encoder:
     _target_: nemo.collections.asr.modules.ConformerEncoder

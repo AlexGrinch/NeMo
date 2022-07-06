@@ -14,6 +14,7 @@
 # limitations under the License.
 import copy
 import json
+import random
 import os
 import tempfile
 from math import ceil
@@ -136,6 +137,8 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         self.encoder = EncDecTransfModelBPE.from_config_dict(self._cfg.encoder)
         
         self.tts_model = FastPitchModel.restore_from(self._cfg.tts_model.model_path).eval()
+        with open(self._cfg.tts_model.speakers_path, "r") as f:
+            self.speakers = sorted(map(int, f.read().split()))
 
         with open_dict(self._cfg):
             if "feat_in" not in self._cfg.ctc_decoder or (
@@ -523,7 +526,8 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         src_ids, src_mask, transcript, tgt_mask, labels = batch
 
         with torch.no_grad():
-            speaker = torch.tensor([19]).to(src_ids.device)
+            speaker_id = random.choice(self.speakers)
+            speaker = torch.tensor([speaker_id]).to(src_ids.device)
             signal, signal_len, *_ = self.tts_model(
                 text=src_ids, durs=None, pitch=None, speaker=speaker, pace=1.0)
             transcript_len = tgt_mask.sum(dim=-1)
