@@ -1,7 +1,7 @@
 from nemo.collections.common.tokenizers import TokenizerSpec
 
-from nemo.collections.tts.torch.g2ps import EnglishG2p
-from nemo.collections.tts.torch.tts_tokenizers import EnglishPhonemesTokenizer
+from nemo.collections.common.tokenizers.tts.g2ps import EnglishG2p
+from nemo.collections.common.tokenizers.tts.tts_tokenizers import EnglishPhonemesTokenizer
 
 __all__ = ['TextToSpeechTokenizer']
 
