@@ -34,26 +34,24 @@ model:
   ctc_reduction: 'mean_batch'
 
   train_ds:
-    use_tarred_dataset: true
-    tar_file_prefix: text
-    tar_files: /workspace/datasets/tarred_playground/text/tarred/text.batches.tokens.8._OP_0..1_CL_.tar
-    metadata_file: /workspace/datasets/tarred_playground/text/tarred/metadata.tokens.8.json
-    lines_per_dataset_fragment: 1000000 # Number of lines to consider for bucketing and padding
-    num_batches_per_tarfile: 100 # Number of batches (pickle files) within each tarfile
-    tar_shuffle_n: 100 # How many samples to look ahead and load to be shuffled
-    shard_strategy: scatter # tarred dataset shard distribution strategy
-    n_preproc_jobs: -2 # number of processes to use for data preprocessing (-2 means all but 2)
-    tokens_in_batch: 512
-    clean: true
-    max_seq_length: 512
-    shuffle: true
-    num_samples: -1
-    drop_last: false
-    pin_memory: false
-    num_workers: 8
-    concat_sampling_technique: temperature # only used with ConcatTranslationDataset 
-    concat_sampling_temperature: 5 # only used with ConcatTranslationDataset 
-    concat_sampling_probabilities: null # only used with ConcatTranslationDataset 
+    text:
+      use_tarred_dataset: true
+      tar_files: /workspace/datasets/tarred_playground/text/tarred/text.batches.tokens.8._OP_0..1_CL_.tar
+      metadata_file: /workspace/datasets/tarred_playground/text/tarred/metadata.tokens.8.json
+      tar_shuffle_n: 100 # How many samples to look ahead and load to be shuffled
+      shard_strategy: scatter # tarred dataset shard distribution strategy
+      drop_last: false
+      pin_memory: false
+      num_workers: 1
+    audio:
+      is_tarred: true
+      tarred_audio_filepaths: /workspace/datasets/tarred_playground/audio/tarred/audio__OP_0..1_CL_.tar
+      manifest_filepath: /workspace/datasets/tarred_playground/audio/tarred/tarred_audio_manifest_small2.json
+      sample_rate: 16000
+      trim_silence: false
+      batch_size: 1
+      num_workers: 1
+    sampling_ratio: 5
 
   validation_ds:
     manifest_filepath: /workspace/datasets/iwslt22/st/manifests/test_small.json
@@ -218,9 +216,9 @@ model:
 trainer:
   gpus: -1 # number of GPUs, -1 would use all available GPUs
   num_nodes: 1
-  max_epochs: 1000
+  max_epochs: 3
   max_steps: null # computed at runtime if not set
-  val_check_interval: 0.5 # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
+  #val_check_interval: 0.5 # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
   accelerator: ddp
   accumulate_grad_batches: 1
   gradient_clip_val: 0.0
@@ -229,7 +227,7 @@ trainer:
   progress_bar_refresh_rate: 10
   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
   num_sanity_val_steps: 0 # number of steps to perform validation steps for sanity check the validation process before starting the training, setting to 0 disables it
-  check_val_every_n_epoch: 5 # number of evaluations on validation every n epochs
+  check_val_every_n_epoch: 1 # number of evaluations on validation every n epochs
   sync_batchnorm: true
   checkpoint_callback: false  # Provided by exp_manager
   logger: false  # Provided by exp_manager

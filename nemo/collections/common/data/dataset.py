@@ -45,12 +45,14 @@ class ConcatDataset(IterableDataset):
         sampling_technique: str = 'temperature',
         sampling_temperature: int = 5,
         sampling_probabilities: List[float] = None,
+        sampling_weights: List[int] = None,
+        sampling_ratio: int = 1,
         global_rank: int = 0,
         world_size: int = 1,
     ):
         super().__init__()
 
-        supported_sampling_techniques = ['temperature', 'random', 'round-robin']
+        supported_sampling_techniques = ['temperature', 'random', 'round-robin', 'weighted']
         self.datasets = datasets
         self.iterables = [None] * len(datasets)
         self.shuffle = shuffle
@@ -65,6 +67,9 @@ class ConcatDataset(IterableDataset):
             self.sampling_kwargs['p'] = sampling_probabilities
         elif sampling_technique == 'round-robin':
             self.index_generator = ConcatDataset.round_robin_generator
+        elif sampling_technique == 'weighted':
+            self.index_generator = ConcatDataset.weighted_generator
+            self.sampling_kwargs['sampling_weights'] = sampling_weights
         else:
             raise ValueError(f"Currently we only support sampling techniques in {supported_sampling_techniques}.")
         self.length = 0
@@ -83,6 +88,10 @@ class ConcatDataset(IterableDataset):
                 self.length += len(dataset) // world_size
             else:
                 self.length += len(dataset)
+                
+        if sampling_technique == 'weighted':
+            denom = sampling_weights[0] * world_size
+            self.length = (len(datasets[0]) // denom) * (sampling_weights[0] + 1) * sampling_ratio
 
     def get_iterable(self, dataset):
         if isinstance(dataset, IterableDataset):
@@ -132,6 +141,12 @@ class ConcatDataset(IterableDataset):
                 yield val
             except StopIteration:
                 self.iterables[ind] = self.get_iterable(self.datasets[ind])
+
+                val = next(self.iterables[ind])
+                if self.kind == 'map':
+                    val = self.datasets[ind][val]
+                yield val
+
                 n -= 1
 
     def __len__(self):
@@ -164,10 +179,24 @@ class ConcatDataset(IterableDataset):
                 yield i
 
     @staticmethod
+    def weighted_generator(datasets, **kwargs):
+        weights = kwargs.get('sampling_weights')
+        if not weights:
+            raise ValueError(
+                "Weighted generator expects a 'sampling_weights' keyword argument for sampling weights."
+            )
+            
+        num = len(datasets)
+        ids = np.repeat(np.arange(num), weights)
+        while True:
+            for i in ids:
+                yield i
+
+    @staticmethod
     def random_generator(datasets, **kwargs):
         p = kwargs.get('p')
         if not p:
-            raise ValueError("Random generator expects a 'p' keyowrd argument for sampling probabilities.")
+            raise ValueError("Random generator expects a 'p' keyword argument for sampling probabilities.")
 
         num = len(datasets)
         if len(p) != num:

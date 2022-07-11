@@ -68,7 +68,7 @@ import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from collections import OrderedDict
 
-from nemo.collections.asr.models import EncDecTransfModelBPE
+from nemo.collections.asr.models import EncDecTransfModelBPE, EncDecTransfModelBPEAudioText
 from nemo.core.config import hydra_runner
 from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
@@ -95,15 +95,8 @@ def main(cfg):
     trainer.fit(asr_model)
 
     if hasattr(cfg.model, 'test_ds') and cfg.model.test_ds.manifest_filepath is not None:
-        gpu = 1 if cfg.trainer.gpus != 0 else 0
-        test_trainer = pl.Trainer(
-            gpus=gpu,
-            precision=trainer.precision,
-            amp_level=trainer.accelerator_connector.amp_level,
-            amp_backend=cfg.trainer.get("amp_backend", "native"),
-        )
-        if asr_model.prepare_test(test_trainer):
-            test_trainer.test(asr_model)
+        if asr_model.prepare_test(trainer):
+            trainer.test(asr_model)
 
 
 if __name__ == '__main__':
