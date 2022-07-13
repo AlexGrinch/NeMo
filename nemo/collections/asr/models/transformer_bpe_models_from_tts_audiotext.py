@@ -32,6 +32,7 @@ from nemo.collections.asr.data.audio_to_text import _speech_collate_fn
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.wer_bpe import WERBPE, CTCBPEDecoding, CTCBPEDecodingConfig
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
+from nemo.collections.asr.parts.features import normalize_batch
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.nlp.models.machine_translation import MTEncDecModel
@@ -133,6 +134,9 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
                 )
             )
             cfg.ctc_decoder["num_classes"] = len(vocabulary)
+            
+        self.use_text_data = cfg.get("use_text_data", False)
+        self.use_audio_data = cfg.get("use_audio_data", False)
 
         super().__init__(cfg=cfg, trainer=trainer)
         self.preprocessor = EncDecTransfModelBPEAudioText.from_config_dict(self._cfg.preprocessor)
@@ -382,45 +386,62 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
         return speech, text
 
     def setup_training_data(self, train_data_config: Optional[DictConfig]):
-
-        audio_config = train_data_config['audio']
+        
         text_config = train_data_config['text']
-        if 'augmentor' in audio_config:
-            augmentor = process_augmentations(audio_config['augmentor'])
+        audio_config = train_data_config['audio']
+
+        if self.use_text_data:
+            # create text dataset
+            text_ds = MTEncDecModel._setup_dataset_from_config(
+                cfg=text_config,
+                encoder_tokenizer=self.encoder_tokenizer,
+                decoder_tokenizer=self.decoder_tokenizer,
+                global_rank=self.global_rank,
+                world_size=self.world_size,
+            )
+
+            if self.use_audio_data:
+                # create audio-text dataset
+                if 'augmentor' in audio_config:
+                    augmentor = process_augmentations(audio_config['augmentor'])
+                else:
+                    augmentor = None
+                shuffle_n = 0
+                audio_ds = audio_to_text_dataset.get_tarred_dataset(
+                    config=audio_config,
+                    tokenizer=self.tokenizer,
+                    shuffle_n=shuffle_n,
+                    global_rank=self.global_rank,
+                    world_size=self.world_size,
+                    augmentor=augmentor,
+                )
+                concat_ds = ConcatDataset(
+                    datasets=[audio_ds, text_ds],
+                    sampling_technique='weighted',
+                    sampling_weights=[audio_config['batch_size'], 1],
+                    upsampling_rate=audio_config['upsampling_rate'],
+                    global_rank=self.global_rank,
+                    world_size=self.world_size,
+                )
+
+                # create audio-text data loader
+                self._train_dl = DataLoader(
+                    dataset=concat_ds,
+                    batch_size=audio_config['batch_size']+1,
+                    collate_fn=self._text_and_speech_collate_fn
+                )
+            else:
+                # create text-only data loader
+                self._train_dl = MTEncDecModel._setup_dataloader_from_config(
+                    cfg=text_config,
+                    dataset=text_ds,
+                )
+        elif self.use_audio_data:
+            # create audio-only data loader
+            self._update_dataset_config(dataset_name='train', config=audio_config)
+            self._train_dl = self._setup_dataloader_from_config(config=audio_config)
         else:
-            augmentor = None
-        shuffle_n = 0
-        audio_ds = audio_to_text_dataset.get_tarred_dataset(
-            config=audio_config,
-            tokenizer=self.tokenizer,
-            shuffle_n=shuffle_n,
-            global_rank=self.global_rank,
-            world_size=self.world_size,
-            augmentor=augmentor,
-        )
-
-        text_ds = MTEncDecModel._setup_dataset_from_config(
-            cfg=text_config,
-            encoder_tokenizer=self.encoder_tokenizer,
-            decoder_tokenizer=self.decoder_tokenizer,
-            global_rank=self.global_rank,
-            world_size=self.world_size,
-        )
-
-        concat_ds = ConcatDataset(
-            datasets=[audio_ds, text_ds],
-            sampling_technique='weighted',
-            sampling_weights=[audio_config['batch_size'], 1],
-            sampling_ratio=train_data_config['sampling_ratio'],
-            global_rank=self.global_rank,
-            world_size=self.world_size,
-        )
-
-        self._train_dl = DataLoader(
-            dataset=concat_ds,
-            batch_size=audio_config['batch_size']+1,
-            collate_fn=self._text_and_speech_collate_fn
-        )
+            raise ValueError("Either text or audio data is required for training.")
 
     def setup_validation_data(self, val_data_config: Optional[Union[DictConfig, Dict]]):
         """
@@ -551,6 +572,9 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
     
     def compute_text_loss(self, batch):
 
+        if batch is None:
+            return 0, 0
+
         for i in range(len(batch)):
             if batch[i].ndim == 3:
                 # Dataset returns already batched data and the first dimension of size 1 added by DataLoader
@@ -565,6 +589,7 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
             signal, signal_len, *_ = self.tts_model(
                 text=src_ids, durs=None, pitch=None, speaker=speaker, pace=1.0)
             transcript_len = tgt_mask.sum(dim=-1)
+            signal = normalize_batch(signal, signal_len, self._cfg.preprocessor["normalize"])
 
         ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
                 processed_signal=signal,
@@ -585,6 +610,10 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
         return loss_value, batch_size
 
     def compute_audio_loss(self, batch):
+
+        if batch is None:
+            return 0, 0
+
         signal, signal_len, transcript, transcript_len = batch
         input_ids, labels = transcript[:, :-1], transcript[:, 1:]
         batch_size = signal.shape[0]
@@ -609,12 +638,21 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
 
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
+        
+        if self.use_text_data:
+            if self.use_audio_data:
+                audio_batch, text_batch = batch
+            else:
+                audio_batch, text_batch = None, batch
+        else:
+            audio_batch, text_batch = batch, None
 
-        audio_batch, text_batch = batch
         audio_loss, audio_bs = self.compute_audio_loss(audio_batch)
         text_loss, text_bs = self.compute_text_loss(text_batch)
         audio_coef = audio_bs / (audio_bs + text_bs)
         text_coef = text_bs / (audio_bs + text_bs)
+        
+        print (audio_loss, text_loss)
 
         loss_value = audio_coef * audio_loss + text_coef * text_loss
 

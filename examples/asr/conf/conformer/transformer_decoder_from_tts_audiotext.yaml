@@ -33,25 +33,30 @@ model:
   log_prediction: true # enables logging sample predictions in the output during training
   ctc_reduction: 'mean_batch'
 
+  use_text_data: true
+  use_audio_data: true
+
   train_ds:
     text:
       use_tarred_dataset: true
-      tar_files: /workspace/datasets/tarred_playground/text/tarred/text.batches.tokens.8._OP_0..1_CL_.tar
-      metadata_file: /workspace/datasets/tarred_playground/text/tarred/metadata.tokens.8.json
+      tar_files: /workspace/datasets/tarred_playground/text/tarred_tiny/text.batches.tokens.8._OP_0..1_CL_.tar
+      metadata_file: /workspace/datasets/tarred_playground/text/tarred_tiny/metadata.tokens.8.json
       tar_shuffle_n: 100 # How many samples to look ahead and load to be shuffled
       shard_strategy: scatter # tarred dataset shard distribution strategy
+      shuffle: false
       drop_last: false
       pin_memory: false
-      num_workers: 1
+      num_workers: 4
     audio:
       is_tarred: true
       tarred_audio_filepaths: /workspace/datasets/tarred_playground/audio/tarred/audio__OP_0..1_CL_.tar
-      manifest_filepath: /workspace/datasets/tarred_playground/audio/tarred/tarred_audio_manifest_small2.json
+      manifest_filepath: /workspace/datasets/tarred_playground/audio/tarred/tarred_audio_manifest_small4.json
       sample_rate: 16000
+      shuffle: false
       trim_silence: false
       batch_size: 1
-      num_workers: 1
-    sampling_ratio: 5
+      upsampling_rate: 5 # how many times the audio dataset is upsampled
+      num_workers: 4
 
   validation_ds:
     manifest_filepath: /workspace/datasets/iwslt22/st/manifests/test_small.json
@@ -216,7 +221,7 @@ model:
 trainer:
   gpus: -1 # number of GPUs, -1 would use all available GPUs
   num_nodes: 1
-  max_epochs: 3
+  max_epochs: 100
   max_steps: null # computed at runtime if not set
   #val_check_interval: 0.5 # Set to 0.25 to check 4 times per epoch, or an int for number of iterations
   accelerator: ddp

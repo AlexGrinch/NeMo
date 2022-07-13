@@ -46,7 +46,7 @@ class ConcatDataset(IterableDataset):
         sampling_temperature: int = 5,
         sampling_probabilities: List[float] = None,
         sampling_weights: List[int] = None,
-        sampling_ratio: int = 1,
+        upsampling_rate: int = 1,
         global_rank: int = 0,
         world_size: int = 1,
     ):
@@ -91,7 +91,7 @@ class ConcatDataset(IterableDataset):
                 
         if sampling_technique == 'weighted':
             denom = sampling_weights[0] * world_size
-            self.length = (len(datasets[0]) // denom) * (sampling_weights[0] + 1) * sampling_ratio
+            self.length = (len(datasets[0]) // denom) * (sampling_weights[0] + 1) * upsampling_rate
 
     def get_iterable(self, dataset):
         if isinstance(dataset, IterableDataset):
