@@ -651,12 +651,15 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
         text_loss, text_bs = self.compute_text_loss(text_batch)
         audio_coef = audio_bs / (audio_bs + text_bs)
         text_coef = text_bs / (audio_bs + text_bs)
-        
-        print (audio_loss, text_loss)
 
         loss_value = audio_coef * audio_loss + text_coef * text_loss
 
-        tensorboard_logs = {'train_loss': loss_value, 'learning_rate': self._optimizer.param_groups[0]['lr']}
+        tensorboard_logs = {
+            'train_loss': loss_value,
+            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'train_loss_audio': audio_loss,
+            'train_loss_text': text_loss,
+        }
 
         if hasattr(self, '_trainer') and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
