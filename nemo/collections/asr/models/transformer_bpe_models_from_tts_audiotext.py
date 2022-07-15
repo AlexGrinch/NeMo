@@ -142,7 +142,10 @@ class EncDecTransfModelBPEAudioText(ASRModel, ExportableEncDecModel, ASRBPEMixin
         self.preprocessor = EncDecTransfModelBPEAudioText.from_config_dict(self._cfg.preprocessor)
         self.encoder = EncDecTransfModelBPEAudioText.from_config_dict(self._cfg.encoder)
         
-        self.tts_model = FastPitchModel.restore_from(self._cfg.tts_model.model_path).eval()
+        self.tts_model = FastPitchModel.restore_from(
+            self._cfg.tts_model.model_path,
+            #map_location="cpu"
+        ).eval()
         with open(self._cfg.tts_model.speakers_path, "r") as f:
             self.speakers = sorted(map(int, f.read().split()))
 
