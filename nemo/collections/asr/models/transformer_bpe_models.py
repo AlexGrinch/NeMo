@@ -13,25 +13,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import itertools
 import json
+import random
 import os
 import tempfile
 from math import ceil
 from typing import Dict, List, Optional, Union
 
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
-from torch.utils.data import ChainDataset
+from torch.utils.data import ChainDataset, DataLoader, default_collate
 from tqdm.auto import tqdm
+from sacrebleu import corpus_bleu
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
+from nemo.collections.asr.data.audio_to_text import _speech_collate_fn
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.wer_bpe import WERBPE, CTCBPEDecoding, CTCBPEDecodingConfig
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
+from nemo.collections.asr.parts.features import normalize_batch
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
+from nemo.collections.nlp.models.machine_translation import MTEncDecModel
+from nemo.collections.tts.models import FastPitchModel
+
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.neural_types import (
     AudioSignal,
@@ -45,8 +54,10 @@ from nemo.core.neural_types import (
 )
 from nemo.utils import logging
 
+from nemo.collections.common.data import ConcatDataset
 from nemo.collections.common.losses import NLLLoss, SmoothedCrossEntropyLoss
 from nemo.collections.common.parts import transformer_weights_init
+from nemo.collections.common.metrics import GlobalAverageLossMetric
 from nemo.collections.nlp.modules.common import TokenClassifier
 from nemo.collections.nlp.modules.common.lm_utils import get_transformer
 from nemo.collections.nlp.modules.common.transformer import BeamSearchSequenceGenerator
@@ -72,6 +83,42 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
 
         if 'tokenizer' not in cfg:
             raise ValueError("`cfg` must have `tokenizer` config to create a tokenizer !")
+        
+        self.encoder_tokenizer_library = cfg.encoder_tokenizer.get('library', 'yttm')
+        self.decoder_tokenizer_library = cfg.decoder_tokenizer.get('library', 'yttm')
+
+        encoder_tokenizer_model, decoder_tokenizer_model, encoder_vocab_file = None, None, None
+        if cfg.encoder_tokenizer.get('tokenizer_model') is not None:
+            encoder_tokenizer_model = self.register_artifact(
+                "encoder_tokenizer.tokenizer_model", cfg.encoder_tokenizer.get('tokenizer_model')
+            )
+
+        if cfg.decoder_tokenizer.get('tokenizer_model') is not None:
+            decoder_tokenizer_model = self.register_artifact(
+                "decoder_tokenizer.tokenizer_model", cfg.decoder_tokenizer.get('tokenizer_model')
+            )
+
+        if cfg.encoder_tokenizer.get('vocab_file') is not None:
+            encoder_vocab_file = (
+                self.register_artifact("encoder_tokenizer.vocab_file", cfg.encoder_tokenizer.get('vocab_file')),
+            )
+
+        encoder_tokenizer, decoder_tokenizer = MTEncDecModel.setup_enc_dec_tokenizers(
+            encoder_tokenizer_library=self.encoder_tokenizer_library,
+            encoder_tokenizer_model=encoder_tokenizer_model,
+            encoder_bpe_dropout=cfg.encoder_tokenizer.get('bpe_dropout', 0.0)
+            if cfg.encoder_tokenizer.get('bpe_dropout', 0.0) is not None else 0.0,
+            encoder_r2l=cfg.encoder_tokenizer.get('r2l', False),
+            decoder_tokenizer_library=self.decoder_tokenizer_library,
+            encoder_tokenizer_vocab_file=encoder_vocab_file,
+            decoder_tokenizer_model=decoder_tokenizer_model,
+            decoder_bpe_dropout=cfg.decoder_tokenizer.get('bpe_dropout', 0.0)
+            if cfg.decoder_tokenizer.get('bpe_dropout', 0.0) is not None else 0.0,
+            decoder_r2l=cfg.decoder_tokenizer.get('r2l', False),
+            encoder_sentencepiece_legacy=cfg.encoder_tokenizer.get('sentencepiece_legacy', False),
+            decoder_sentencepiece_legacy=cfg.encoder_tokenizer.get('sentencepiece_legacy', False),
+        )
+        self.encoder_tokenizer, self.decoder_tokenizer = encoder_tokenizer, decoder_tokenizer
 
         # Setup the tokenizer
         self._setup_tokenizer(cfg.tokenizer)
@@ -91,10 +138,20 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                 )
             )
             cfg.ctc_decoder["num_classes"] = len(vocabulary)
+            
+        self.use_text_data = cfg.get("use_text_data", False)
+        self.use_audio_data = cfg.get("use_audio_data", False)
 
         super().__init__(cfg=cfg, trainer=trainer)
         self.preprocessor = EncDecTransfModelBPE.from_config_dict(self._cfg.preprocessor)
         self.encoder = EncDecTransfModelBPE.from_config_dict(self._cfg.encoder)
+
+        self.tts_model = FastPitchModel.restore_from(
+            self._cfg.tts_model.model_path,
+            map_location="cpu"
+        ).eval()
+        with open(self._cfg.tts_model.speakers_path, "r") as f:
+            self.speakers = sorted(map(int, f.read().split()))
 
         with open_dict(self._cfg):
             if "feat_in" not in self._cfg.ctc_decoder or (
@@ -165,24 +222,26 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
 
         self.ctc_coef = self._cfg.get("ctc_coef", 0.5)
 
-        # Setup decoding objects
-        decoding_cfg = self.cfg.get('decoding', None)
+        self.val_loss = GlobalAverageLossMetric(dist_sync_on_step=False, take_avg_loss=True)
 
-        # In case decoding config not found, use default config
-        if decoding_cfg is None:
-            decoding_cfg = OmegaConf.structured(CTCBPEDecodingConfig)
-            with open_dict(self.cfg):
-                self.cfg.decoding = decoding_cfg
+#         # Setup decoding objects
+#         decoding_cfg = self.cfg.get('decoding', None)
 
-        self.decoding = CTCBPEDecoding(self.cfg.decoding, tokenizer=self.tokenizer)
+#         # In case decoding config not found, use default config
+#         if decoding_cfg is None:
+#             decoding_cfg = OmegaConf.structured(CTCBPEDecodingConfig)
+#             with open_dict(self.cfg):
+#                 self.cfg.decoding = decoding_cfg
+
+#         self.decoding = CTCBPEDecoding(self.cfg.decoding, tokenizer=self.tokenizer)
         
-        # Setup metric objects
-        self._wer = WERBPE(
-            decoding=self.decoding,
-            use_cer=self._cfg.get('use_cer', False),
-            dist_sync_on_step=True,
-            log_prediction=self._cfg.get("log_prediction", False),
-        )
+#         # Setup metric objects
+#         self._wer = WERBPE(
+#             decoding=self.decoding,
+#             use_cer=self._cfg.get('use_cer', False),
+#             dist_sync_on_step=True,
+#             log_prediction=self._cfg.get("log_prediction", False),
+#         )
 
     @torch.no_grad()
     def transcribe(
@@ -330,39 +389,68 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             pin_memory=config.get('pin_memory', False),
         )
 
-    def setup_training_data(self, train_data_config: Optional[Union[DictConfig, Dict]]):
-        """
-        Sets up the training data loader via a Dict-like object.
-        Args:
-            train_data_config: A config that contains the information regarding construction
-                of an ASR Training dataset.
-        Supported Datasets:
-            -   :class:`~nemo.collections.asr.data.audio_to_text.AudioToCharDataset`
-            -   :class:`~nemo.collections.asr.data.audio_to_text.AudioToBPEDataset`
-            -   :class:`~nemo.collections.asr.data.audio_to_text.TarredAudioToCharDataset`
-            -   :class:`~nemo.collections.asr.data.audio_to_text.TarredAudioToBPEDataset`
-            -   :class:`~nemo.collections.asr.data.audio_to_text_dali.AudioToCharDALIDataset`
-        """
-        if 'shuffle' not in train_data_config:
-            train_data_config['shuffle'] = True
+    def _text_and_speech_collate_fn(self, batch):
+        speech = _speech_collate_fn(batch[:-1], self.tokenizer.pad_id)
+        text = default_collate(batch[-1:])
+        return speech, text
 
-        # preserve config
-        self._update_dataset_config(dataset_name='train', config=train_data_config)
+    def setup_training_data(self, train_data_config: Optional[DictConfig]):
+        
+        text_config = train_data_config['text']
+        audio_config = train_data_config['audio']
 
-        self._train_dl = self._setup_dataloader_from_config(config=train_data_config)
+        if self.use_text_data:
+            # create text dataset
+            text_ds = MTEncDecModel._setup_dataset_from_config(
+                cfg=text_config,
+                encoder_tokenizer=self.encoder_tokenizer,
+                decoder_tokenizer=self.decoder_tokenizer,
+                global_rank=self.global_rank,
+                world_size=self.world_size,
+            )
 
-        # Need to set this because if using an IterableDataset, the length of the dataloader is the total number
-        # of samples rather than the number of batches, and this messes up the tqdm progress bar.
-        # So we set the number of steps manually (to the correct number) to fix this.
-        if 'is_tarred' in train_data_config and train_data_config['is_tarred']:
-            # We also need to check if limit_train_batches is already set.
-            # If it's an int, we assume that the user has set it to something sane, i.e. <= # training batches,
-            # and don't change it. Otherwise, adjust batches accordingly if it's a float (including 1.0).
-            if isinstance(self._trainer.limit_train_batches, float):
-                self._trainer.limit_train_batches = int(
-                    self._trainer.limit_train_batches
-                    * ceil((len(self._train_dl.dataset) / self.world_size) / train_data_config['batch_size'])
+            if self.use_audio_data:
+                # create audio-text dataset
+                if 'augmentor' in audio_config:
+                    augmentor = process_augmentations(audio_config['augmentor'])
+                else:
+                    augmentor = None
+                shuffle_n = 0
+                audio_ds = audio_to_text_dataset.get_tarred_dataset(
+                    config=audio_config,
+                    tokenizer=self.tokenizer,
+                    shuffle_n=shuffle_n,
+                    global_rank=self.global_rank,
+                    world_size=self.world_size,
+                    augmentor=augmentor,
                 )
+                concat_ds = ConcatDataset(
+                    datasets=[audio_ds, text_ds],
+                    sampling_technique='weighted',
+                    sampling_weights=[audio_config['batch_size'], 1],
+                    upsampling_rate=audio_config['upsampling_rate'],
+                    global_rank=self.global_rank,
+                    world_size=self.world_size,
+                )
+
+                # create audio-text data loader
+                self._train_dl = DataLoader(
+                    dataset=concat_ds,
+                    batch_size=audio_config['batch_size']+1,
+                    collate_fn=self._text_and_speech_collate_fn
+                )
+            else:
+                # create text-only data loader
+                self._train_dl = MTEncDecModel._setup_dataloader_from_config(
+                    cfg=text_config,
+                    dataset=text_ds,
+                )
+        elif self.use_audio_data:
+            # create audio-only data loader
+            self._update_dataset_config(dataset_name='train', config=audio_config)
+            self._train_dl = self._setup_dataloader_from_config(config=audio_config)
+        else:
+            raise ValueError("Either text or audio data is required for training.")
 
     def setup_validation_data(self, val_data_config: Optional[Union[DictConfig, Dict]]):
         """
@@ -490,51 +578,113 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         transf_log_probs = self.log_softmax(hidden_states=dec_states)
 
         return ctc_log_probs, transf_log_probs, encoded_len, greedy_predictions, enc_states, enc_mask
+    
+    def compute_text_loss(self, batch):
+
+        if batch is None:
+            return 0, 0
+
+        for i in range(len(batch)):
+            if batch[i].ndim == 3:
+                # Dataset returns already batched data and the first dimension of size 1 added by DataLoader
+                # is excess.
+                batch[i] = batch[i].squeeze(dim=0)
+        src_ids, src_mask, transcript, tgt_mask, labels = batch
+        batch_size = src_ids.shape[0]
+
+        with torch.no_grad():
+            speaker_id = random.choice(self.speakers)
+            speaker = torch.tensor([speaker_id]).to(src_ids.device)
+            signal, signal_len, *_ = self.tts_model(
+                text=src_ids, durs=None, pitch=None, speaker=speaker, pace=1.0)
+            transcript_len = tgt_mask.sum(dim=-1)
+            signal = normalize_batch(signal, signal_len, self._cfg.preprocessor["normalize"])
+
+        ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
+                processed_signal=signal,
+                processed_signal_length=signal_len,
+                transcript=transcript,
+                transcript_length=transcript_len,
+        )
+
+        ctc_loss = self.ctc_loss(
+            log_probs=ctc_log_probs,
+            targets=transcript,
+            input_lengths=encoded_len,
+            target_lengths=transcript_len
+        )
+        transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=labels)
+        loss_value = self.ctc_coef * ctc_loss + (1 - self.ctc_coef) * transf_loss
+
+        return loss_value, batch_size
+
+    def compute_audio_loss(self, batch):
+
+        if batch is None:
+            return 0, 0
+
+        signal, signal_len, transcript, transcript_len = batch
+        input_ids, labels = transcript[:, :-1], transcript[:, 1:]
+        batch_size = signal.shape[0]
+
+        ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
+            input_signal=signal,
+            input_signal_length=signal_len,
+            transcript=input_ids,
+            transcript_length=transcript_len,
+        )
+
+        ctc_loss = self.ctc_loss(
+            log_probs=ctc_log_probs,
+            targets=transcript,
+            input_lengths=encoded_len,
+            target_lengths=transcript_len
+        )
+        transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=labels)
+        loss_value = self.ctc_coef * ctc_loss + (1 - self.ctc_coef) * transf_loss
+
+        return loss_value, batch_size
 
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
-        signal, signal_len, transcript, transcript_len = batch
-        input_ids, labels = transcript[:, :-1], transcript[:, 1:]
-
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
-                processed_signal=signal,
-                processed_signal_length=signal_len,
-                transcript=input_ids,
-                transcript_length=transcript_len,
-            )
+        
+        if self.use_text_data:
+            if self.use_audio_data:
+                audio_batch, text_batch = batch
+            else:
+                audio_batch, text_batch = None, batch
         else:
-            ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
-                input_signal=signal,
-                input_signal_length=signal_len,
-                transcript=input_ids,
-                transcript_length=transcript_len,
-            )
+            audio_batch, text_batch = batch, None
 
-        ctc_loss = self.ctc_loss(
-            log_probs=ctc_log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
-        )
-        transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=labels)
+        audio_loss, audio_bs = self.compute_audio_loss(audio_batch)
+        text_loss, text_bs = self.compute_text_loss(text_batch)
+        audio_coef = audio_bs / (audio_bs + text_bs)
+        text_coef = text_bs / (audio_bs + text_bs)
 
-        loss_value = self.ctc_coef * ctc_loss + (1 - self.ctc_coef) * transf_loss
+        loss_value = audio_coef * audio_loss + text_coef * text_loss
 
-        tensorboard_logs = {'train_loss': loss_value, 'learning_rate': self._optimizer.param_groups[0]['lr']}
+        tensorboard_logs = {
+            'train_loss': loss_value,
+            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'train_loss_audio': audio_loss,
+            'train_loss_text': text_loss,
+        }
 
         if hasattr(self, '_trainer') and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
         else:
             log_every_n_steps = 1
 
-        if (batch_nb + 1) % log_every_n_steps == 0:
-            self._wer.update(
-                predictions=predictions,
-                targets=transcript,
-                target_lengths=transcript_len,
-                predictions_lengths=encoded_len,
-            )
-            wer, _, _ = self._wer.compute()
-            self._wer.reset()
-            tensorboard_logs.update({'training_batch_wer': wer})
+#         if (batch_nb + 1) % log_every_n_steps == 0:
+#             self._wer.update(
+#                 predictions=predictions,
+#                 targets=transcript,
+#                 target_lengths=transcript_len,
+#                 predictions_lengths=encoded_len,
+#             )
+#             wer, _, _ = self._wer.compute()
+#             self._wer.reset()
+#             tensorboard_logs.update({'training_batch_wer': wer})
 
         return {'loss': loss_value, 'log': tensorboard_logs}
 
@@ -562,23 +712,72 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         )
         loss_value = self.transf_loss(log_probs=transf_log_probs, labels=labels)
 
-        self._wer.update(
-            predictions=beam_hypotheses,
-            targets=transcript,
-            target_lengths=transcript_len,
-            predictions_lengths=encoded_len,
+        ground_truths = [
+            self.decoder_tokenizer.ids_to_text(sent) for sent in transcript.detach().cpu().tolist()
+        ]
+        translations = [
+            self.decoder_tokenizer.ids_to_text(sent) for sent in beam_hypotheses.detach().cpu().tolist()
+        ]
+
+        self.val_loss(
+            loss=loss_value,
+            num_measurements=transf_log_probs.shape[0] * transf_log_probs.shape[1]
         )
-        wer, wer_num, wer_denom = self._wer.compute()
-        self._wer.reset()
-        return {'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer}
+
+#         self._wer.update(
+#             predictions=beam_hypotheses,
+#             targets=transcript,
+#             target_lengths=transcript_len,
+#             predictions_lengths=encoded_len,
+#         )
+#         wer, wer_num, wer_denom = self._wer.compute()
+#         self._wer.reset()
+#         return {'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer}
+        return {'val_loss': loss_value, 'translations': translations, 'ground_truths': ground_truths}
+
+    def validation_epoch_end(self, outputs):
+        """
+        Called at the end of validation to aggregate outputs.
+        :param outputs: list of individual outputs of each validation step.
+        """
+        if not outputs:
+            return
+
+        if isinstance(outputs[0], dict):
+            outputs = [outputs]
+            
+        for output in outputs:
+            eval_loss = getattr(self, 'val_loss').compute()
+            translations = list(itertools.chain(*[x['translations'] for x in output]))
+            ground_truths = list(itertools.chain(*[x['ground_truths'] for x in output]))
+            
+            # Gather translations and ground truths from all workers
+            tr_and_gt = [None for _ in range(self.world_size)]
+            # we also need to drop pairs where ground truth is an empty string
+            dist.all_gather_object(
+                tr_and_gt, [(t, g) for (t, g) in zip(translations, ground_truths) if g.strip() != '']
+            )
+
+            if self.global_rank == 0:
+                _translations = []
+                _ground_truths = []
+                for rank in range(0, self.world_size):
+                    _translations += [t for (t, g) in tr_and_gt[rank]]
+                    _ground_truths += [g for (t, g) in tr_and_gt[rank]]
+
+                sacre_bleu = corpus_bleu(_translations, [_ground_truths], tokenize="13a")
+                sb_score = sacre_bleu.score * self.world_size
+            else:
+                sb_score = 0.0
+
+            self.log(f"val_loss", eval_loss, sync_dist=True)
+            self.log(f"val_sacreBLEU", sb_score, sync_dist=True)
+            self.val_loss.reset()
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         logs = self.validation_step(batch, batch_idx, dataloader_idx=dataloader_idx)
         test_logs = {
             'test_loss': logs['val_loss'],
-            'test_wer_num': logs['val_wer_num'],
-            'test_wer_denom': logs['val_wer_denom'],
-            'test_wer': logs['val_wer'],
         }
         return test_logs
 
