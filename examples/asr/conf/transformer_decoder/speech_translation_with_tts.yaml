@@ -35,6 +35,7 @@ model:
 
   use_text_data: true
   use_audio_data: true
+  use_transf_encoder: false
 
   train_ds:
     text:
@@ -167,7 +168,16 @@ model:
     feat_in: null
     num_classes: -1
     vocabulary: []
-    
+
+  transf_encoder:
+    num_layers: 2
+    hidden_size: 512
+    inner_size: 2048
+    num_attention_heads: 8
+    ffn_dropout: 0.1
+    attn_score_dropout: 0.1
+    attn_layer_dropout: 0.1
+
   transf_decoder:
     library: nemo
     model_name: null

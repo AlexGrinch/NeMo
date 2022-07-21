@@ -60,7 +60,10 @@ from nemo.collections.common.parts import transformer_weights_init
 from nemo.collections.common.metrics import GlobalAverageLossMetric
 from nemo.collections.nlp.modules.common import TokenClassifier
 from nemo.collections.nlp.modules.common.lm_utils import get_transformer
-from nemo.collections.nlp.modules.common.transformer import BeamSearchSequenceGenerator
+from nemo.collections.nlp.modules.common.transformer import (
+    TransformerEncoder,
+    BeamSearchSequenceGenerator,
+)
 
 __all__ = ['EncDecTransfModelBPE']
 
@@ -141,6 +144,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             
         self.use_text_data = cfg.get("use_text_data", False)
         self.use_audio_data = cfg.get("use_audio_data", False)
+        self.use_transf_encoder = cfg.get("use_transf_encoder", False)
 
         super().__init__(cfg=cfg, trainer=trainer)
         self.preprocessor = EncDecTransfModelBPE.from_config_dict(self._cfg.preprocessor)
@@ -169,6 +173,25 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             reduction=self._cfg.get("ctc_reduction", "mean_batch"),
         )
 
+        if self.use_transf_encoder:
+            # Transformer encoder
+            transf_encoder_cfg_dict = OmegaConf.to_container(cfg.get('transf_encoder'))
+            self.transf_encoder = TransformerEncoder(
+                num_layers=transf_encoder_cfg_dict['num_layers'],
+                hidden_size=transf_encoder_cfg_dict['hidden_size'],
+                inner_size=transf_encoder_cfg_dict['inner_size'],
+                mask_future=False,
+                num_attention_heads=transf_encoder_cfg_dict['num_attention_heads'],
+                attn_score_dropout=transf_encoder_cfg_dict['attn_score_dropout'],
+                attn_layer_dropout=transf_encoder_cfg_dict['attn_layer_dropout'],
+                ffn_dropout=transf_encoder_cfg_dict['ffn_dropout'],
+                pre_ln=transf_encoder_cfg_dict.get('pre_ln', True),
+                pre_ln_final_layer_norm=transf_encoder_cfg_dict.get('pre_ln_final_layer_norm', True),
+            )
+            std_init_range = 1 / transf_encoder_cfg_dict['hidden_size'] ** 0.5
+            self.transf_encoder.apply(lambda module: transformer_weights_init(module, std_init_range))
+
+        # Transformer decoder
         vocab_size = 8 * ceil(self.tokenizer.vocab_size / 8)
         transf_decoder_cfg_dict = OmegaConf.to_container(cfg.get('transf_decoder'))
         transf_decoder_cfg_dict['vocab_size'] = vocab_size
@@ -176,8 +199,6 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         model_name = transf_decoder_cfg_dict.pop('model_name', None)
         pretrained = transf_decoder_cfg_dict.pop('pretrained', False)
         checkpoint_file = transf_decoder_cfg_dict.pop('checkpoint_file', None)
-
-        # Transformer decoder
         self.transf_decoder = get_transformer(
             library=library,
             model_name=model_name,
@@ -186,6 +207,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             encoder=False,
             pre_ln_final_layer_norm=transf_decoder_cfg_dict.get("pre_ln_final_layer_norm", False),
         )
+
         self.log_softmax = TokenClassifier(
             hidden_size=self.transf_decoder.hidden_size,
             num_classes=vocab_size,
@@ -572,6 +594,10 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         enc_states = encoded.permute(0, 2, 1)
         enc_mask = lens_to_mask(encoded_len, enc_states.shape[1]).to(enc_states.dtype)
         dec_mask = lens_to_mask(transcript_length, transcript.shape[1]).to(transcript.dtype)
+
+        if self.use_transf_encoder:
+            enc_states = self.transf_encoder(encoder_states=enc_states, encoder_mask=enc_mask)
+
         dec_states = self.transf_decoder(
             input_ids=transcript, decoder_mask=dec_mask, encoder_embeddings=enc_states, encoder_mask=enc_mask
         )
