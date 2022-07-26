@@ -81,8 +81,8 @@ class MultiHeadAttention(nn.Module):
         q = self.linear_q(query).view(n_batch, -1, self.h, self.d_k)
         k = self.linear_k(key).view(n_batch, -1, self.h, self.d_k)
         v = self.linear_v(value).view(n_batch, -1, self.h, self.d_k)
-        q = q.transpose(1, 2) / self.s_d_k
-        k = k.transpose(1, 2) / self.s_d_k
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
         return q, k, v
@@ -121,6 +121,8 @@ class MultiHeadAttention(nn.Module):
             output (torch.Tensor): transformed `value` (batch, time1, d_model) weighted by the query dot key attention
         """
         q, k, v = self.forward_qkv(query, key, value)
+        q = q / self.s_d_k
+        k = k / self.s_d_k
         scores = torch.matmul(q, k.transpose(-2, -1))
         return self.forward_attention(v, scores, mask)
 
@@ -178,15 +180,16 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         """
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
+        k = k / self.s_d_k
 
         n_batch_pos = pos_emb.size(0)
         p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
-        p = p.transpose(1, 2)  # (batch, head, time1, d_k)
+        p = p.transpose(1, 2) / self.s_d_k  # (batch, head, time1, d_k)
 
         # (batch, head, time1, d_k)
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
+        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2) / self.s_d_k
         # (batch, head, time1, d_k)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
+        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2) / self.s_d_k
 
         # compute attention score
         # first compute matrix a and matrix c
