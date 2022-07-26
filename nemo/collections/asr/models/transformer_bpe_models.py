@@ -298,6 +298,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
 
         # We will store transcriptions here
         hypotheses = []
+
         # Model's mode and device
         mode = self.training
         device = next(self.parameters()).device
@@ -311,7 +312,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             self.eval()
             # Freeze the encoder and decoder modules
             self.encoder.freeze()
-            self.decoder.freeze()
+            self.transf_decoder.freeze()
             logging_level = logging.get_verbosity()
             logging.set_verbosity(logging.WARNING)
             # Work in tmp directory - will store manifest file there
@@ -325,28 +326,27 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
 
                 temporary_datalayer = self._setup_transcribe_dataloader(config)
                 for test_batch in tqdm(temporary_datalayer, desc="Transcribing"):
-                    logits, logits_len, greedy_predictions = self.forward(
-                        input_signal=test_batch[0].to(device), input_signal_length=test_batch[1].to(device)
+                    ctc_lp, _, encoded_len, predictions, enc_states, enc_mask = self.forward(
+                        input_signal=test_batch[0].to(device),
+                        input_signal_length=test_batch[1].to(device)
                     )
-                    if logprobs:
+
+                    beam_hypotheses = self.beam_search(
+                        encoder_hidden_states=enc_states,
+                        encoder_input_mask=enc_mask,
+                        return_beam_scores=False
+                    ).detach().cpu().numpy()
+                    beam_hypotheses = [
+                        self.tokenizer.ids_to_text(hyp) for hyp in beam_hypotheses
+                    ]
+
+                    if return_hypotheses:
                         # dump log probs per file
                         for idx in range(logits.shape[0]):
-                            lg = logits[idx][: logits_len[idx]]
-                            hypotheses.append(lg.cpu().numpy())
-                    else:
-                        current_hypotheses = self._wer.ctc_decoder_predictions_tensor(
-                            greedy_predictions, predictions_len=logits_len, return_hypotheses=return_hypotheses
-                        )
+                            current_hypotheses[idx].y_sequence = logits[idx][: logits_len[idx]]
 
-                        if return_hypotheses:
-                            # dump log probs per file
-                            for idx in range(logits.shape[0]):
-                                current_hypotheses[idx].y_sequence = logits[idx][: logits_len[idx]]
+                    hypotheses += beam_hypotheses
 
-                        hypotheses += current_hypotheses
-
-                    del greedy_predictions
-                    del logits
                     del test_batch
         finally:
             # set mode back to its original value
@@ -355,8 +355,9 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             self.preprocessor.featurizer.pad_to = pad_to_value
             if mode is True:
                 self.encoder.unfreeze()
-                self.decoder.unfreeze()
+                self.transf_decoder.unfreeze()
             logging.set_verbosity(logging_level)
+
         return hypotheses
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
