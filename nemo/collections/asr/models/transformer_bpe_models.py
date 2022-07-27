@@ -460,7 +460,9 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                 self._train_dl = DataLoader(
                     dataset=concat_ds,
                     batch_size=audio_config['batch_size']+1,
-                    collate_fn=self._text_and_speech_collate_fn
+                    collate_fn=self._text_and_speech_collate_fn,
+                    num_workers=train_data_config.get('num_workers', 0),
+                    pin_memory=train_data_config.get('pin_memory', False),
                 )
             else:
                 # create text-only data loader

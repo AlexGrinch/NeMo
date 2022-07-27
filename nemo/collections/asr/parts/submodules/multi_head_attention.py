@@ -187,26 +187,23 @@ class RelPositionMultiHeadAttention(MultiHeadAttention):
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
         # (batch, head, time1, d_k)
         q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
-        
-        with torch.cuda.amp.autocast(dtype=torch.float32):
 
-            # compute attention score
-            # first compute matrix a and matrix c
-            # as described in https://arxiv.org/abs/1901.02860 Section 3.3
-            # (batch, head, time1, time2)
-            matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
+        # compute attention score
+        # first compute matrix a and matrix c
+        # as described in https://arxiv.org/abs/1901.02860 Section 3.3
+        # (batch, head, time1, time2)
+        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
 
-            # compute matrix b and matrix d
-            # (batch, head, time1, time2)
-            matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
-            matrix_bd = self.rel_shift(matrix_bd)
-            # drops extra elements in the matrix_bd to match the matrix_ac's size
-            matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
+        # compute matrix b and matrix d
+        # (batch, head, time1, time2)
+        matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
+        matrix_bd = self.rel_shift(matrix_bd)
+        # drops extra elements in the matrix_bd to match the matrix_ac's size
+        matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
 
-            scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
-            out = self.forward_attention(v, scores, mask)
+        scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
 
-        return out
+        return self.forward_attention(v, scores, mask)
 
 
 class PositionalEncoding(torch.nn.Module):
