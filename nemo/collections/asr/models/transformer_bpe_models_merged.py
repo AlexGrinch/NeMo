@@ -480,6 +480,7 @@ class EncDecTransfModelBPEMerged(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                     collate_fn=self._text_and_speech_collate_fn,
                     num_workers=train_data_config.get('num_workers', 0),
                     pin_memory=train_data_config.get('pin_memory', False),
+                    drop_last=train_data_config.get('drop_last', True)
                 )
             else:
                 # create text-only data loader
