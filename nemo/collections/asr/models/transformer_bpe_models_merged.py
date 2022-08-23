@@ -619,6 +619,7 @@ class EncDecTransfModelBPEMerged(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         if self.spec_augmentation is not None and self.training:
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
 
+        processed_signal = processed_signal * 2
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         ctc_log_probs = self.ctc_decoder(encoder_output=encoded)
         greedy_predictions = ctc_log_probs.argmax(dim=-1, keepdim=False)

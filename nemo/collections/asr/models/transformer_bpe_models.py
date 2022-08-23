@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
-from torch.utils.data import ChainDataset, DataLoader, default_collate
+from torch.utils.data import ChainDataset, DataLoader
 from tqdm.auto import tqdm
 from sacrebleu import corpus_bleu
 
@@ -39,6 +39,7 @@ from nemo.collections.asr.parts.features import normalize_batch
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
 from nemo.collections.nlp.models.machine_translation import MTEncDecModel
+from nemo.collections.nlp.data.data_utils import bitext_collate_fn
 from nemo.collections.tts.models import FastPitchModel
 
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
@@ -413,8 +414,18 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         )
 
     def _text_and_speech_collate_fn(self, batch):
-        speech = _speech_collate_fn(batch[:-1], self.tokenizer.pad_id)
-        text = default_collate(batch[-1:])
+        text_batches, speech_batches = [], []
+        for i, b in enumerate(batch):
+            if len(b) == 4:
+                speech_batches.append(b)
+            else:
+                text_batches.append(b)
+        speech = _speech_collate_fn(speech_batches, self.tokenizer.pad_id)
+        text = bitext_collate_fn(
+            text_batches,
+            self.encoder_tokenizer.pad_id,
+            self.decoder_tokenizer.pad_id,
+        )
         return speech, text
 
     def setup_training_data(self, train_data_config: Optional[DictConfig]):
@@ -450,7 +461,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                 concat_ds = ConcatDataset(
                     datasets=[audio_ds, text_ds],
                     sampling_technique='weighted',
-                    sampling_weights=[audio_config['batch_size'], 1],
+                    sampling_weights=[audio_config['batch_size'], text_config['batch_size']],
                     upsampling_rate=audio_config['upsampling_rate'],
                     global_rank=self.global_rank,
                     world_size=self.world_size,
@@ -459,7 +470,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                 # create audio-text data loader
                 self._train_dl = DataLoader(
                     dataset=concat_ds,
-                    batch_size=audio_config['batch_size']+1,
+                    batch_size=audio_config['batch_size']+text_config['batch_size'],
                     collate_fn=self._text_and_speech_collate_fn,
                     num_workers=train_data_config.get('num_workers', 0),
                     pin_memory=train_data_config.get('pin_memory', False),
@@ -592,15 +603,17 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
 
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
-        ctc_log_probs = self.ctc_decoder(encoder_output=encoded)
-        greedy_predictions = ctc_log_probs.argmax(dim=-1, keepdim=False)
+        #ctc_log_probs = self.ctc_decoder(encoder_output=encoded)
+        #greedy_predictions = ctc_log_probs.argmax(dim=-1, keepdim=False)
 
         enc_states = encoded.permute(0, 2, 1)
         enc_mask = lens_to_mask(encoded_len, enc_states.shape[1]).to(enc_states.dtype)
         dec_mask = lens_to_mask(transcript_length, transcript.shape[1]).to(transcript.dtype)
-
         if self.use_transf_encoder:
             enc_states = self.transf_encoder(encoder_states=enc_states, encoder_mask=enc_mask)
+
+        ctc_log_probs = self.ctc_decoder(encoder_output=enc_states.permute(0, 2, 1))
+        greedy_predictions = ctc_log_probs.argmax(dim=-1, keepdim=False)
 
         dec_states = self.transf_decoder(
             input_ids=transcript, decoder_mask=dec_mask, encoder_embeddings=enc_states, encoder_mask=enc_mask
@@ -618,7 +631,8 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             if batch[i].ndim == 3:
                 # Dataset returns already batched data and the first dimension of size 1 added by DataLoader
                 # is excess.
-                batch[i] = batch[i].squeeze(dim=0)
+                seq_length = batch[i].shape[-1]
+                batch[i] = batch[i].view(-1, seq_length)
         src_ids, src_mask, transcript, tgt_mask, labels = batch
         batch_size = src_ids.shape[0]
 
@@ -631,10 +645,10 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             signal = normalize_batch(signal, signal_len, self._cfg.preprocessor["normalize"])
 
         ctc_log_probs, transf_log_probs, encoded_len, predictions, enc_states, enc_mask = self.forward(
-                processed_signal=signal,
-                processed_signal_length=signal_len,
-                transcript=transcript,
-                transcript_length=transcript_len,
+            processed_signal=signal,
+            processed_signal_length=signal_len,
+            transcript=transcript,
+            transcript_length=transcript_len,
         )
 
         ctc_loss = self.ctc_loss(
