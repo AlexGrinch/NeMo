@@ -46,49 +46,51 @@ def _speech_collate_fn(batch, pad_id):
                assumes the signals are 1d torch tensors (i.e. mono audio).
     """
     packed_batch = list(zip(*batch))
-    if len(packed_batch) == 5:
-        _, audio_lengths, _, tokens_lengths, sample_ids = packed_batch
-    elif len(packed_batch) == 4:
-        sample_ids = None
-        _, audio_lengths, _, tokens_lengths = packed_batch
-    else:
-        raise ValueError("Expects 4 or 5 tensors in the batch!")
+
+    num_tensors = len(packed_batch)
+    all_lengths = packed_batch[1::2]
+    audio_lengths = all_lengths[0]
+    token_lengths = all_lengths[1:]
+        
     max_audio_len = 0
     has_audio = audio_lengths[0] is not None
     if has_audio:
         max_audio_len = max(audio_lengths).item()
-    max_tokens_len = max(tokens_lengths).item()
+    max_tokens_len = [max(t).item() for t in token_lengths]
 
-    audio_signal, tokens = [], []
+    audio_signal = []
+    tokens = [[] for i in range((num_tensors-2)//2)]
     for b in batch:
-        if len(b) == 5:
-            sig, sig_len, tokens_i, tokens_i_len, _ = b
-        else:
-            sig, sig_len, tokens_i, tokens_i_len = b
+
+        sig, sig_len = b[:2]
+
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
                 pad = (0, max_audio_len - sig_len)
                 sig = torch.nn.functional.pad(sig, pad)
             audio_signal.append(sig)
-        tokens_i_len = tokens_i_len.item()
-        if tokens_i_len < max_tokens_len:
-            pad = (0, max_tokens_len - tokens_i_len)
-            tokens_i = torch.nn.functional.pad(tokens_i, pad, value=pad_id)
-        tokens.append(tokens_i)
+            
+        for t in range(2, len(b), 2):
+            tokens_t, tokens_t_len = b[t:(t+2)]
+            tokens_t_len = tokens_t_len.item()
+            if tokens_t_len < max_tokens_len[(t-2)//2]:
+                pad = (0, max_tokens_len[(t-2)//2] - tokens_t_len)
+                tokens_t = torch.nn.functional.pad(tokens_t, pad, value=pad_id[(t-2)//2])
+            tokens[(t-2)//2].append(tokens_t)
 
     if has_audio:
         audio_signal = torch.stack(audio_signal)
         audio_lengths = torch.stack(audio_lengths)
     else:
         audio_signal, audio_lengths = None, None
-    tokens = torch.stack(tokens)
-    tokens_lengths = torch.stack(tokens_lengths)
-    if sample_ids is None:
-        return audio_signal, audio_lengths, tokens, tokens_lengths
-    else:
-        sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
-        return audio_signal, audio_lengths, tokens, tokens_lengths, sample_ids
+    res = [audio_signal, audio_lengths]
+
+    for i in range(len(tokens)):
+        tokens_lengths = torch.stack(token_lengths[i])
+        res.extend([torch.stack(tokens[i]), tokens_lengths])
+
+    return res
 
 
 class ASRManifestProcessor:
@@ -117,9 +119,9 @@ class ASRManifestProcessor:
         max_duration: Optional[float] = None,
         min_duration: Optional[float] = None,
         max_utts: int = 0,
-        bos_id: Optional[int] = None,
-        eos_id: Optional[int] = None,
-        pad_id: int = 0,
+        bos_id: Optional[Union[int, List[int]]] = None,
+        eos_id: Optional[Union[int, List[int]]] = None,
+        pad_id: Union[int, List[int]] = 0,
         index_by_file_id: bool = False,
     ):
         self.parser = parser
@@ -239,6 +241,8 @@ class _AudioTextDataset(Dataset):
         return {
             'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'nopc_transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'nopc_transcript_length': NeuralType(tuple('B'), LengthsType()),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -255,9 +259,9 @@ class _AudioTextDataset(Dataset):
         min_duration: Optional[int] = None,
         max_utts: int = 0,
         trim: bool = False,
-        bos_id: Optional[int] = None,
-        eos_id: Optional[int] = None,
-        pad_id: int = 0,
+        bos_id: Optional[Union[int, List[int]]] = None,
+        eos_id: Optional[Union[int, List[int]]] = None,
+        pad_id: Union[int, List[int]] = 0,
         return_sample_id: bool = False,
     ):
         if type(manifest_filepath) == str:
@@ -276,6 +280,9 @@ class _AudioTextDataset(Dataset):
         self.featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=augmentor)
         self.trim = trim
         self.return_sample_id = return_sample_id
+        self.eos_id = eos_id
+        self.bos_id = bos_id
+        self.pad_id = pad_id
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
@@ -290,16 +297,23 @@ class _AudioTextDataset(Dataset):
         features = self.featurizer.process(
             sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim, orig_sr=sample.orig_sr
         )
-        f, fl = features, torch.tensor(features.shape[0]).long()
 
-        t, tl = self.manifest_processor.process_text_by_sample(sample=sample)
+        res = [features, torch.tensor(features.shape[0]).long()]
 
-        if self.return_sample_id:
-            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), index
-        else:
-            output = f, fl, torch.tensor(t).long(), torch.tensor(tl).long()
+        # Text features
+        for i, text_tokens in enumerate(sample.text_tokens):
+            t, tl = text_tokens, len(text_tokens)
 
-        return output
+            if self.bos_id[i] is not None:
+                t = [self.bos_id[i]] + t
+                tl += 1
+            if self.eos_id[i] is not None:
+                t = t + [self.eos_id[i]]
+                tl += 1
+            res.extend([torch.tensor(t).long(), torch.tensor(tl).long()])
+
+        return res
+
 
     def __len__(self):
         return len(self.manifest_processor.collection)
@@ -437,6 +451,8 @@ class AudioToBPEDataset(_AudioTextDataset):
         return {
             'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'nopc_transcripts': NeuralType(('B', 'T'), LabelsType()),
+            'nopc_transcript_length': NeuralType(tuple('B'), LengthsType()),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -456,31 +472,34 @@ class AudioToBPEDataset(_AudioTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
     ):
-        bos_id = None
-        eos_id = None
+        bos_id = [None for t in tokenizer]
+        eos_id = [None for t in tokenizer]
+        pad_id = [None for t in tokenizer]
 
-        if use_start_end_token:
-            if hasattr(tokenizer, 'bos_token') or hasattr(tokenizer, 'bos_id'):
-                bos_id = tokenizer.bos_id
-            if hasattr(tokenizer, 'eos_token') or hasattr(tokenizer, 'eos_id'):
-                eos_id = tokenizer.eos_id
+        for i, t in enumerate(tokenizer):
+            if use_start_end_token:
+                if hasattr(t, 'bos_token') or hasattr(t, 'bos_id'):
+                    bos_id[i] = t.bos_id
+                if hasattr(t, 'eos_token') or hasattr(t, 'eos_id'):
+                    eos_id[i] = t.eos_id
 
-        if hasattr(tokenizer, 'pad_token') or hasattr(tokenizer, 'pad_id'):
-            pad_id = tokenizer.pad_id
-        else:
-            pad_id = 0
+            if hasattr(t, 'pad_token') or hasattr(t, 'pad_id'):
+                pad_id[i] = t.pad_id
+            else:
+                pad_id[i] = 0
 
         class TokenizerWrapper:
             def __init__(self, tokenizer):
-                if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
-                    self.is_aggregate = True
-                else:
-                    self.is_aggregate = False
+#                 if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
+#                     self.is_aggregate = True
+#                 else:
+#                     self.is_aggregate = False
                 self._tokenizer = tokenizer
 
             def __call__(self, *args):
-                t = self._tokenizer.text_to_ids(*args)
-                return t
+                tokens = [t.text_to_ids(*args) for t in self._tokenizer]
+#                 t = self._tokenizer.text_to_ids(*args)
+                return tokens
 
         super().__init__(
             manifest_filepath=manifest_filepath,
@@ -499,6 +518,7 @@ class AudioToBPEDataset(_AudioTextDataset):
         )
 
 
+# +
 class _TarredAudioToTextDataset(IterableDataset):
     """
     A similar Dataset to the AudioToCharDataset/AudioToBPEDataset, but which loads tarred audio files.
@@ -600,9 +620,9 @@ class _TarredAudioToTextDataset(IterableDataset):
         max_duration: Optional[float] = None,
         max_utts: int = 0,
         trim: bool = False,
-        bos_id: Optional[int] = None,
-        eos_id: Optional[int] = None,
-        pad_id: int = 0,
+        bos_id: Optional[Union[int, List[int]]] = None,
+        eos_id: Optional[Union[int, List[int]]] = None,
+        pad_id: Union[int, List[int]] = 0,
         shard_strategy: str = "scatter",
         global_rank: int = 0,
         world_size: int = 0,
@@ -735,24 +755,26 @@ class _TarredAudioToTextDataset(IterableDataset):
         audio_filestream.close()
 
         # Audio features
-        f, fl = features, torch.tensor(features.shape[0]).long()
+#         f, fl = features, torch.tensor(features.shape[0]).long()
+        res = [features, torch.tensor(features.shape[0]).long()]
 
         # Text features
-        t, tl = manifest_entry.text_tokens, len(manifest_entry.text_tokens)
+        for i, text_tokens in enumerate(manifest_entry.text_tokens):
+            t, tl = text_tokens, len(text_tokens)
 
-        self.manifest_processor.process_text_by_sample(sample=manifest_entry)
+            if self.bos_id[i] is not None:
+                t = [self.bos_id[i]] + t
+                tl += 1
+            if self.eos_id[i] is not None:
+                t = t + [self.eos_id[i]]
+                tl += 1
+            res.extend([torch.tensor(t).long(), torch.tensor(tl).long()])
 
-        if self.bos_id is not None:
-            t = [self.bos_id] + t
-            tl += 1
-        if self.eos_id is not None:
-            t = t + [self.eos_id]
-            tl += 1
-
-        if self.return_sample_id:
-            return f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), manifest_idx
-        else:
-            return f, fl, torch.tensor(t).long(), torch.tensor(tl).long()
+#         if self.return_sample_id:
+#             return f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), manifest_idx
+#         else:
+#             return f, fl, torch.tensor(t).long(), torch.tensor(tl).long()
+        return res
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
@@ -763,6 +785,8 @@ class _TarredAudioToTextDataset(IterableDataset):
     def __len__(self):
         return len(self.manifest_processor.collection)
 
+
+# -
 
 class TarredAudioToCharDataset(_TarredAudioToTextDataset):
     """
@@ -979,7 +1003,7 @@ class TarredAudioToBPEDataset(_TarredAudioToTextDataset):
         self,
         audio_tar_filepaths: Union[str, List[str]],
         manifest_filepath: str,
-        tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        tokenizer: List['nemo.collections.common.tokenizers.TokenizerSpec'],
         sample_rate: int,
         int_values: bool = False,
         augmentor: Optional['nemo.collections.asr.parts.perturb.AudioAugmentor'] = None,
@@ -994,31 +1018,34 @@ class TarredAudioToBPEDataset(_TarredAudioToTextDataset):
         world_size: int = 0,
         return_sample_id: bool = False,
     ):
-        bos_id = None
-        eos_id = None
+        bos_id = [None for t in tokenizer]
+        eos_id = [None for t in tokenizer]
+        pad_id = [None for t in tokenizer]
 
-        if use_start_end_token:
-            if hasattr(tokenizer, 'bos_token') or hasattr(tokenizer, 'bos_id'):
-                bos_id = tokenizer.bos_id
-            if hasattr(tokenizer, 'eos_token') or hasattr(tokenizer, 'eos_id'):
-                eos_id = tokenizer.eos_id
+        for i, t in enumerate(tokenizer):
+            if use_start_end_token:
+                if hasattr(t, 'bos_token') or hasattr(t, 'bos_id'):
+                    bos_id[i] = t.bos_id
+                if hasattr(t, 'eos_token') or hasattr(t, 'eos_id'):
+                    eos_id[i] = t.eos_id
 
-        if hasattr(tokenizer, 'pad_token') or hasattr(tokenizer, 'pad_id'):
-            pad_id = tokenizer.pad_id
-        else:
-            pad_id = 0
+            if hasattr(t, 'pad_token') or hasattr(t, 'pad_id'):
+                pad_id[i] = t.pad_id
+            else:
+                pad_id[i] = 0
 
         class TokenizerWrapper:
             def __init__(self, tokenizer):
-                if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
-                    self.is_aggregate = True
-                else:
-                    self.is_aggregate = False
+#                 if isinstance(tokenizer, tokenizers.aggregate_tokenizer.AggregateTokenizer):
+#                     self.is_aggregate = True
+#                 else:
+#                     self.is_aggregate = False
                 self._tokenizer = tokenizer
 
             def __call__(self, *args):
-                t = self._tokenizer.text_to_ids(*args)
-                return t
+                tokens = [t.text_to_ids(*args) for t in self._tokenizer]
+#                 t = self._tokenizer.text_to_ids(*args)
+                return tokens
 
         super().__init__(
             audio_tar_filepaths=audio_tar_filepaths,

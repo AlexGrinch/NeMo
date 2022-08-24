@@ -128,7 +128,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         self._setup_tokenizer(cfg.tokenizer)
 
         # Set the new vocabulary
-        vocabulary = self.tokenizer.tokenizer.get_vocab()
+        vocabulary = self.nopc_tokenizer.tokenizer.get_vocab()
         with open_dict(cfg):
             cfg.ctc_decoder.vocabulary = ListConfig(list(vocabulary.keys()))
 
@@ -193,7 +193,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             self.transf_encoder.apply(lambda module: transformer_weights_init(module, std_init_range))
 
         # Transformer decoder
-        vocab_size = 8 * ceil(self.tokenizer.vocab_size / 8)
+        vocab_size = 8 * ceil(self.pc_tokenizer.vocab_size / 8)
         transf_decoder_cfg_dict = OmegaConf.to_container(cfg.get('transf_decoder'))
         transf_decoder_cfg_dict['vocab_size'] = vocab_size
         library = transf_decoder_cfg_dict.pop('library', 'nemo')
@@ -228,14 +228,14 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             log_softmax=self.log_softmax,
             max_sequence_length=self.transf_decoder.max_sequence_length,
             beam_size=self._cfg.beam_search.beam_size,
-            bos=self.tokenizer.bos_id,
-            pad=self.tokenizer.pad_id,
-            eos=self.tokenizer.eos_id,
+            bos=self.pc_tokenizer.bos_id,
+            pad=self.pc_tokenizer.pad_id,
+            eos=self.pc_tokenizer.eos_id,
             len_pen=self._cfg.beam_search.len_pen,
             max_delta_length=self._cfg.beam_search.max_generation_delta,
         )
         self.transf_loss = SmoothedCrossEntropyLoss(
-            pad_id=self.tokenizer.pad_id, label_smoothing=self._cfg.label_smoothing
+            pad_id=self.pc_tokenizer.pad_id, label_smoothing=self._cfg.label_smoothing
         )
 
         if hasattr(self._cfg, 'spec_augment') and self._cfg.spec_augment is not None:
@@ -338,7 +338,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                         return_beam_scores=False
                     ).detach().cpu().numpy()
                     beam_hypotheses = [
-                        self.tokenizer.ids_to_text(hyp) for hyp in beam_hypotheses
+                        self.pc_tokenizer.ids_to_text(hyp) for hyp in beam_hypotheses
                     ]
 
                     if return_hypotheses:
@@ -382,7 +382,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
             shuffle_n = config.get('shuffle_n', 4 * config['batch_size']) if shuffle else 0
             dataset = audio_to_text_dataset.get_tarred_dataset(
                 config=config,
-                tokenizer=self.tokenizer,
+                tokenizer=[self.nopc_tokenizer, self.pc_tokenizer],
                 shuffle_n=shuffle_n,
                 global_rank=self.global_rank,
                 world_size=self.world_size,
@@ -395,7 +395,9 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
                 return None
 
             dataset = audio_to_text_dataset.get_bpe_dataset(
-                config=config, tokenizer=self.tokenizer, augmentor=augmentor
+                config=config,
+                tokenizer=[self.nopc_tokenizer, self.pc_tokenizer],
+                augmentor=augmentor
             )
 
         if type(dataset) is ChainDataset:
@@ -667,7 +669,8 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         if batch is None:
             return 0, 0
 
-        signal, signal_len, transcript, transcript_len = batch
+        signal, signal_len, nopc_transcript, nopc_transcript_len, transcript, transcript_len = batch
+
         input_ids, labels = transcript[:, :-1], transcript[:, 1:]
         batch_size = signal.shape[0]
 
@@ -680,9 +683,9 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
 
         ctc_loss = self.ctc_loss(
             log_probs=ctc_log_probs,
-            targets=transcript,
+            targets=nopc_transcript,
             input_lengths=encoded_len,
-            target_lengths=transcript_len
+            target_lengths=nopc_transcript_len
         )
         transf_loss = self.transf_loss(log_probs=transf_log_probs, labels=labels)
         loss_value = self.ctc_coef * ctc_loss + (1 - self.ctc_coef) * transf_loss
@@ -733,7 +736,7 @@ class EncDecTransfModelBPE(ASRModel, ExportableEncDecModel, ASRBPEMixin):
         return {'loss': loss_value, 'log': tensorboard_logs}
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len = batch
+        signal, signal_len, _nopc_tr, _nopc_tr_len, transcript, transcript_len = batch
         input_ids, labels = transcript[:, :-1], transcript[:, 1:]
 
         if isinstance(batch, DALIOutputs) and batch.has_processed_signal:

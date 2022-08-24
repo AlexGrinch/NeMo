@@ -48,140 +48,32 @@ class ASRBPEMixin(ABC):
     AGGREGATE_TOKENIZERS_DICT_PREFIX = 'langs'
 
     def _setup_tokenizer(self, tokenizer_cfg: DictConfig):
-        tokenizer_type = tokenizer_cfg.get('type')
-        if tokenizer_type is None:
-            raise ValueError("`tokenizer.type` cannot be None")
-        elif tokenizer_type.lower() == 'agg':
-            self._setup_aggregate_tokenizer(tokenizer_cfg)
-        else:
-            self._setup_monolingual_tokenizer(tokenizer_cfg)
+        self._setup_monolingual_tokenizer(tokenizer_cfg)
 
     def _setup_monolingual_tokenizer(self, tokenizer_cfg: DictConfig):
         # Prevent tokenizer parallelism (unless user has explicitly set it)
-        if 'TOKENIZERS_PARALLELISM' not in os.environ:
-            os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
         self.tokenizer_cfg = OmegaConf.to_container(tokenizer_cfg, resolve=True)  # type: dict
-        self.tokenizer_dir = self.tokenizer_cfg.pop('dir')  # Remove tokenizer directory
-        self.tokenizer_type = self.tokenizer_cfg.pop('type').lower()  # Remove tokenizer_type
 
-        self.hf_tokenizer_kwargs = self.tokenizer_cfg.pop("hf_kwargs", {})  # Remove HF tokenizer kwargs
-
-        # just in case the previous tokenizer was an aggregate
-        self._cleanup_aggregate_config_and_artifacts_if_needed()
-
-        # Preserve config
-        if hasattr(self, 'cfg') and 'tokenizer' in self.cfg:
-            self.cfg.tokenizer.dir = self.tokenizer_dir
-            self.cfg.tokenizer.type = self.tokenizer_type
-
-            if 'hf_kwargs' in tokenizer_cfg:
-                with open_dict(self.cfg.tokenizer):
-                    self.cfg.tokenizer.hf_kwargs = tokenizer_cfg.get('hf_kwargs')
-
-        if self.tokenizer_type not in ['bpe', 'wpe', 'yttm']:
-            raise ValueError(
-                "`tokenizer.type` must be either `bpe` for SentencePiece tokenizer,"
-                "`wpe` for BERT based tokenizer or `yttm` for YouTokenToMe tokenizer"
-            )
-
-        if self.tokenizer_type == 'bpe':
-            # This is a BPE Tokenizer
-            if 'model_path' in self.tokenizer_cfg:
-                model_path = self.tokenizer_cfg.get('model_path')
-            else:
-                model_path = os.path.join(self.tokenizer_dir, 'tokenizer.model')
-            model_path = self.register_artifact('tokenizer.model_path', model_path)
-            self.model_path = model_path
-
-            if 'special_tokens' in self.tokenizer_cfg:
-                special_tokens = self.tokenizer_cfg['special_tokens']
-
-                if special_tokens is not None:
-                    raise ValueError("`special_tokens` are no longer supported for SentencePiece based tokenizers.")
-
-            # Update special tokens
-            self.tokenizer = tokenizers.SentencePieceTokenizer(model_path=model_path)
-
-            if 'vocab_path' in self.tokenizer_cfg:
-                vocab_path = self.tokenizer_cfg.get('vocab_path')
-            else:
-                vocab_path = os.path.join(self.tokenizer_dir, 'vocab.txt')
-            vocab_path = self.register_artifact('tokenizer.vocab_path', vocab_path)
-            self.vocab_path = vocab_path
-
-            try:
-                if 'spe_tokenizer_vocab' in self.tokenizer_cfg:
-                    spe_vocab_path = self.tokenizer_cfg.get('spe_tokenizer_vocab')
-                else:
-                    spe_vocab_path = os.path.join(self.tokenizer_dir, 'tokenizer.vocab')
-                spe_vocab_path = self.register_artifact('tokenizer.spe_tokenizer_vocab', spe_vocab_path)
-                self.spe_vocab_path = spe_vocab_path
-            except FileNotFoundError:
-                # fallback case for older checkpoints that did not preserve the tokenizer.vocab
-                self.spe_vocab_path = None
-
-            vocabulary = {}
-            for i in range(self.tokenizer.vocab_size):
-                piece = self.tokenizer.ids_to_tokens([i])
-                piece = piece[0]
-                vocabulary[piece] = i + 1
-
-            # wrapper method to get vocabulary conveniently
-            def get_vocab():
-                return vocabulary
-
-            # attach utility values to the tokenizer wrapper
-            self.tokenizer.tokenizer.vocab_size = len(vocabulary)
-            self.tokenizer.tokenizer.get_vocab = get_vocab
-            self.tokenizer.tokenizer.all_special_tokens = self.tokenizer.special_token_to_id
-
-        elif self.tokenizer_type == 'wpe':
-            # This is a WPE Tokenizer
-            # If path from previous registration exists, remove it
-            if 'vocab_path' in self.tokenizer_cfg:
-                vocab_path = self.tokenizer_cfg.get('vocab_path')
-            else:
-                vocab_path = os.path.join(self.tokenizer_dir, 'vocab.txt')
-            vocab_path = self.register_artifact('tokenizer.vocab_path', vocab_path)
-            self.vocab_path = vocab_path
-
-            # If path from previous registration exists, remove it
-            if 'vocab_path' in self.tokenizer_cfg:
-                self.tokenizer_cfg.pop('vocab_path')
-
-            self.tokenizer = tokenizers.AutoTokenizer(
-                pretrained_model_name='bert-base-cased',
-                vocab_file=self.vocab_path,
-                mask_token=self.hf_tokenizer_kwargs.get('mask_token', None),
-                bos_token=self.hf_tokenizer_kwargs.get('bos_token', None),
-                eos_token=self.hf_tokenizer_kwargs.get('eos_token', None),
-                pad_token=self.hf_tokenizer_kwargs.get('pad_token', None),
-                sep_token=self.hf_tokenizer_kwargs.get('sep_token', None),
-                cls_token=self.hf_tokenizer_kwargs.get('cls_token', None),
-                unk_token=self.hf_tokenizer_kwargs.get('unk_token', None),
-                use_fast=self.hf_tokenizer_kwargs.get('use_fast', False),
-            )
-        else:
-            # This is a YouTokenToMe BPE Tokenizer
-            self.tokenizer = tokenizers.YouTokenToMeTokenizer(model_path=self.tokenizer_cfg.get('model_path'))
-
-            vocabulary = {}
-            for i, piece in enumerate(self.tokenizer.tokenizer.vocab()):
-                vocabulary[piece] = i
-
-            # wrapper method to get vocabulary conveniently
-            def get_vocab():
-                return vocabulary
-
-            self.tokenizer.tokenizer.vocab_size = len(vocabulary)
-            self.tokenizer.tokenizer.get_vocab = get_vocab
-
-        logging.info(
-            "Tokenizer {} initialized with {} tokens".format(
-                self.tokenizer.__class__.__name__, self.tokenizer.vocab_size
-            )
+        # This is a YouTokenToMe BPE Tokenizer
+        self.nopc_tokenizer = tokenizers.YouTokenToMeTokenizer(
+            model_path=self.tokenizer_cfg.get('tokenizer_nopc').get('model_path'),
+            punct_capit=False,
         )
+        self.pc_tokenizer = tokenizers.YouTokenToMeTokenizer(
+            model_path=self.tokenizer_cfg.get('tokenizer_pc').get('model_path')
+        )
+
+        vocabulary = {}
+        for i, piece in enumerate(self.nopc_tokenizer.tokenizer.vocab()):
+            vocabulary[piece] = i
+
+        # wrapper method to get vocabulary conveniently
+        def get_vocab():
+            return vocabulary
+
+        self.nopc_tokenizer.tokenizer.vocab_size = len(vocabulary)
+        self.nopc_tokenizer.tokenizer.get_vocab = get_vocab
+
 
     def _setup_aggregate_tokenizer(self, tokenizer_cfg: DictConfig):
         # Prevent tokenizer parallelism (unless user has explicitly set it)

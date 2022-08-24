@@ -33,7 +33,7 @@ model:
   log_prediction: true # enables logging sample predictions in the output during training
   ctc_reduction: 'mean_batch'
 
-  use_text_data: true
+  use_text_data: false
   use_audio_data: true
   use_transf_encoder: false
 
@@ -47,6 +47,7 @@ model:
       shuffle: false
       drop_last: false
       pin_memory: false
+      batch_size: 1
       num_workers: 4
     audio:
       is_tarred: true
@@ -80,9 +81,14 @@ model:
   # recommend small vocab size of 128 or 256 when using 4x sub-sampling
   # you may find more detail on how to train a tokenizer at: /scripts/tokenizers/process_asr_text_tokenizer.py
   tokenizer:
-    dir: ???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
-    model_path: ??? # path to speech tokenizer model
-    type: yttm  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
+    tokenizer_pc:
+      dir: ???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
+      model_path: ??? # path to speech tokenizer model
+      type: yttm  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
+    tokenizer_nopc:
+      dir: ???  # path to directory which contains either tokenizer.model (bpe) or vocab.txt (wpe)
+      model_path: ??? # path to speech tokenizer model
+      type: yttm  # Can be either bpe (SentencePiece tokenizer) or wpe (WordPiece tokenizer)
     
   encoder_tokenizer:
     library: tts

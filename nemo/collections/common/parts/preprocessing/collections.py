@@ -156,13 +156,14 @@ class AudioText(_Collection):
                 text_tokens = token_labels
             else:
                 if text != '':
-                    if hasattr(parser, "is_aggregate") and parser.is_aggregate:
-                        if lang is not None:
-                            text_tokens = parser(text, lang)
-                        else:
-                            raise ValueError("lang required in manifest when using aggregate tokenizers")
-                    else:
-                        text_tokens = parser(text)
+                    text_tokens = parser(text)
+#                     if hasattr(parser, "is_aggregate") and parser.is_aggregate:
+#                         if lang is not None:
+#                             text_tokens = parser(text, lang)
+#                         else:
+#                             raise ValueError("lang required in manifest when using aggregate tokenizers")
+#                     else:
+#                         text_tokens = parser(text)
                 else:
                     text_tokens = []
 

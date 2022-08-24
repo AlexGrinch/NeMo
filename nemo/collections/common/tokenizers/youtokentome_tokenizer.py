@@ -14,15 +14,18 @@
 
 from pathlib import Path
 
+import string
 import youtokentome as yttm
 
 from nemo.collections.common.tokenizers import TokenizerSpec
 
 __all__ = ['YouTokenToMeTokenizer']
 
+PUNCT_TRANSLATE = str.maketrans('', '', string.punctuation[:6]+string.punctuation[7:]) 
+
 
 class YouTokenToMeTokenizer(TokenizerSpec):
-    def __init__(self, model_path, bpe_dropout=0.0, legacy=False, r2l=False):
+    def __init__(self, model_path, bpe_dropout=0.0, legacy=False, r2l=False, punct_capit=True):
         model_path = Path(model_path).expanduser()
         self.tokenizer = yttm.BPE(model=str(model_path))
         self.vocab_size = len(self.tokenizer.vocab())
@@ -30,8 +33,12 @@ class YouTokenToMeTokenizer(TokenizerSpec):
         self.bpe_dropout = bpe_dropout
         self.legacy = legacy
         self.r2l = r2l
+        self.punct_capit = punct_capit
 
     def text_to_tokens(self, text):
+        if not self.punct_capit:
+            text = text.lower().translate(PUNCT_TRANSLATE)
+            text = " ".join(text.split())
         return self.tokenizer.encode(
             text, output_type=yttm.OutputType.SUBWORD, dropout_prob=self.bpe_dropout, reverse=self.r2l
         )
@@ -40,6 +47,9 @@ class YouTokenToMeTokenizer(TokenizerSpec):
         return self.ids_to_text(self.tokens_to_ids(tokens))
 
     def text_to_ids(self, text):
+        if not self.punct_capit:
+            text = text.lower().translate(PUNCT_TRANSLATE)
+            text = " ".join(text.split())
         return self.tokenizer.encode(
             text, output_type=yttm.OutputType.ID, dropout_prob=self.bpe_dropout, reverse=self.r2l
         )
