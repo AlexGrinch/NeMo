@@ -37,7 +37,7 @@ class YouTokenToMeTokenizer(TokenizerSpec):
 
     def text_to_tokens(self, text):
         if not self.punct_capit:
-            text = text.lower().translate(PUNCT_TRANSLATE)
+            text = text.lower().replace("-", " ").translate(PUNCT_TRANSLATE)
             text = " ".join(text.split())
         return self.tokenizer.encode(
             text, output_type=yttm.OutputType.SUBWORD, dropout_prob=self.bpe_dropout, reverse=self.r2l
